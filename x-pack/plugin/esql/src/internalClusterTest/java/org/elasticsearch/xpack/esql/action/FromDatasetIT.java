@@ -230,7 +230,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "logs_noext_strict",
         "employees_extensionless",
         "logs_id_partition",
-        "logs_partition_collide_nonstrict"
+        "logs_partition_collide_nonstrict",
+        "logs_partition_collide_path"
     );
 
     /**
@@ -2375,6 +2376,33 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         );
         assertThat(e.getMessage(), containsString("collides with a partition column"));
         assertThat(e.getMessage(), containsString("region"));
+
+        // Same reject via the physical name: a declared column whose `path` points at the partition key
+        // collides just as a name-match does — the read would map the physical to a shadowed path-derived column.
+        java.util.Map<String, DatasetFieldMapping> pathProps = new java.util.LinkedHashMap<>();
+        pathProps.put("region_alias", new DatasetFieldMapping("integer", "region")); // path physical collides with "region"
+        DatasetMapping pathMapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, pathProps));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_partition_collide_path",
+                    "local_ds",
+                    root.toUri() + "**/*.csv",
+                    null,
+                    new HashMap<>(Map.of("format", "csv", "hive_partitioning", true)),
+                    pathMapping
+                )
+            )
+        );
+        Exception pe = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM logs_partition_collide_path | LIMIT 1"), TIMEOUT).close()
+        );
+        assertThat(pe.getMessage(), containsString("collides with a partition column"));
+        assertThat(pe.getMessage(), containsString("region_alias"));
     }
 
     public void testStrictHivePartitionedGlob() throws Exception {
