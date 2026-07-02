@@ -91,6 +91,14 @@ final class CompressionDelegatingFormatReader implements FormatReader {
     }
 
     @Override
+    public FormatReader withDeclaredDateFormats(Map<String, String> physicalNameToPattern) {
+        // Delegate to the wrapped text reader (a compressed .csv.gz / .ndjson.gz still text-parses); without this the
+        // interface default would return the wrapper and the declared per-column formats would be silently dropped.
+        FormatReader configured = inner.withDeclaredDateFormats(physicalNameToPattern);
+        return configured == inner ? this : new CompressionDelegatingFormatReader(configured, codec);
+    }
+
+    @Override
     public RowPositionStrategy rowPositionStrategy() {
         return inner.rowPositionStrategy();
     }

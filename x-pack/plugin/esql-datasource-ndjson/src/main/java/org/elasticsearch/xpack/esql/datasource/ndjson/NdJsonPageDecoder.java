@@ -261,13 +261,7 @@ public class NdJsonPageDecoder implements Closeable {
         );
     }
 
-    /**
-     * Buffered-bytes constructor for the streaming-parallel path: {@code data[offset .. offset+length)}
-     * is the entire input. Recovery from {@link JsonParseException} stays inside the byte array
-     * (no buffered-bytes shuttling through {@link NdJsonUtils#moveToNextLine}) by scanning for the
-     * next {@code '\n'} from the parser's current byte offset.
-     */
-    /** No-declared-date-formats convenience for the byte[] path. */
+    /** No-declared-date-formats convenience for the byte[] path (see the {@code declaredDateFormats}-carrying ctor below). */
     NdJsonPageDecoder(
         byte[] data,
         int offset,
@@ -297,6 +291,12 @@ public class NdJsonPageDecoder implements Closeable {
         );
     }
 
+    /**
+     * Buffered-bytes constructor for the streaming-parallel path: {@code data[offset .. offset+length)}
+     * is the entire input. Recovery from {@link JsonParseException} stays inside the byte array
+     * (no buffered-bytes shuttling through {@link NdJsonUtils#moveToNextLine}) by scanning for the
+     * next {@code '\n'} from the parser's current byte offset.
+     */
     NdJsonPageDecoder(
         byte[] data,
         int offset,

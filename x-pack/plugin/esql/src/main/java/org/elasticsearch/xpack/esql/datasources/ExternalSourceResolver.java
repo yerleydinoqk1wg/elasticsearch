@@ -490,6 +490,8 @@ public class ExternalSourceResolver {
         // FormatNameResolver, which applies the same reader-then-format-then-extension precedence (and lowercasing)
         // as the inferred path. A hand-rolled `format` check here would miss both and mis-key the dispatch.
         String sourceType = FormatNameResolver.resolve(config, path);
+        // Strict declarations skip the non-strict overlay's rejectFileTypedRetypes, so guard the columnar-format case here.
+        rejectDeclaredFormatOnColumnar(sourceType, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -550,6 +552,8 @@ public class ExternalSourceResolver {
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
         // Same reader-then-format-then-extension dispatch as the single-file strict path above.
         String sourceType = FormatNameResolver.resolve(config, path);
+        // Strict declarations skip the non-strict overlay's rejectFileTypedRetypes, so guard the columnar-format case here.
+        rejectDeclaredFormatOnColumnar(sourceType, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -601,6 +605,32 @@ public class ExternalSourceResolver {
     private static final Set<String> FILE_TYPED_FORMATS = Set.of("parquet", "orc");
 
     /**
+     * Rejects a declared date {@code format} on a columnar ({@code parquet}/{@code orc}) dataset column, for BOTH strict
+     * and non-strict declarations (the type-match reject below only runs on the non-strict overlay, but a format is
+     * meaningless on columnar regardless of mode). A {@code format} is a text-parse pattern; columnar formats carry
+     * native typed values and never text-parse, so the declared format could never take effect — reject loudly at
+     * resolution rather than silently ignore it. No-op for text formats, where a declared format IS honored, and when
+     * the format is not yet knowable at PUT (so this query-time check is the gate). Needs only the sourceType and the
+     * declaration — no inferred schema — so the strict paths can call it too.
+     */
+    private static void rejectDeclaredFormatOnColumnar(String sourceType, DatasetMapping declaredMapping) {
+        if (FILE_TYPED_FORMATS.contains(sourceType) == false || declaredMapping.mappings() == null) {
+            return;
+        }
+        for (Map.Entry<String, DatasetFieldMapping> e : declaredMapping.mappings().properties().entrySet()) {
+            if (e.getValue().format() != null) {
+                throw new IllegalArgumentException(
+                    "[format] on column ["
+                        + e.getKey()
+                        + "] is not supported for ["
+                        + sourceType
+                        + "] datasets; columns carry their own native type"
+                );
+            }
+        }
+    }
+
+    /**
      * For a file-typed format, every declared column's type must equal the reconciled (inferred) type of the physical
      * column it reads. The readers emit the file's own types; reconciliation already casts per file toward the unified
      * type — so a matching declaration works by construction, and a differing one would surface as an internal block
@@ -613,17 +643,6 @@ public class ExternalSourceResolver {
             inferredTypes.put(a.name(), a.dataType());
         }
         for (Map.Entry<String, DatasetFieldMapping> e : declaredMapping.mappings().properties().entrySet()) {
-            // A declared date `format` is a text-parse pattern; columnar formats carry native typed values and never
-            // text-parse, so a format here is meaningless — reject it loudly rather than silently ignore it.
-            if (e.getValue().format() != null) {
-                throw new IllegalArgumentException(
-                    "[format] on column ["
-                        + e.getKey()
-                        + "] is not supported for ["
-                        + inferred.sourceType()
-                        + "] datasets; columns carry their own native type"
-                );
-            }
             String physical = e.getValue().path() != null ? e.getValue().path() : e.getKey();
             DataType inferredType = inferredTypes.get(physical);
             if (inferredType == null) {
@@ -651,6 +670,7 @@ public class ExternalSourceResolver {
         DatasetMapping declaredMapping
     ) {
         final ExternalSourceMetadata inferred = resolved.metadata();
+        rejectDeclaredFormatOnColumnar(inferred.sourceType(), declaredMapping);
         if (FILE_TYPED_FORMATS.contains(inferred.sourceType())) {
             rejectFileTypedRetypes(inferred, declaredMapping);
         }

@@ -374,7 +374,9 @@ final class FileSourceFactory implements ExternalSourceFactory {
         Map<String, String> renames = spec.renames();
         Map<String, String> physical = new HashMap<>(logical.size());
         for (Map.Entry<String, String> e : logical.entrySet()) {
-            physical.put(renames.getOrDefault(e.getKey(), e.getKey()), e.getValue());
+            // Route through the PhysicalNames chokepoint (the single source of truth for logical->physical) rather than
+            // hand-rolling the lookup, so this reader-facing name surface stays consistent with the others.
+            physical.put(PhysicalNames.translate(e.getKey(), renames), e.getValue());
         }
         return physical;
     }

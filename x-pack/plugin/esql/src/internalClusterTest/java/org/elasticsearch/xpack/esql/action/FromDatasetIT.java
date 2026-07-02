@@ -217,7 +217,16 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "employees_strict_hive",
         "employees_strict_hive_collide",
         "employees_parquet_type_conflict",
-        "employees_strict_wrong_order"
+        "employees_strict_wrong_order",
+        "logs_csv_strict",
+        "logs_csv_nonstrict",
+        "logs_csv_filelevel",
+        "logs_csv_iso",
+        "logs_parquet_format",
+        "logs_ndjson",
+        "logs_csv_rename",
+        "logs_csv_gz",
+        "logs_parquet_strict_format"
     );
 
     /**
@@ -722,6 +731,120 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             List<List<Object>> rows = getValuesList(response);
             assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
         }
+    }
+
+    public void testDeclaredDateFormatFollowsPathRename() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // The physical column `ts` is exposed as logical `event_time` via a `path` rename AND carries a declared format.
+        // The format must follow the column through the rename (the spec is logical-keyed; FileSourceFactory physicalizes
+        // the key back to `ts` for the reader). If the logical->physical re-keying were inverted, the reader would look
+        // up the formatter under the wrong name and the value would fall to the undeclared path.
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("event_time", new DatasetFieldMapping("date", "ts", List.of(), ACCESS_LOG_FORMAT));
+        properties.put("note", new DatasetFieldMapping("keyword", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_rename",
+                    "local_ds",
+                    csvDateFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+
+        try (
+            var response = run(
+                syncEsqlQueryRequest("FROM logs_csv_rename | SORT event_time | EVAL ms = event_time::long | KEEP ms | LIMIT 1"),
+                TIMEOUT
+            )
+        ) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
+        }
+    }
+
+    public void testDeclaredDateFormatOverGzipCsvParsesZoneAware() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // Compressed .csv.gz goes through CompressionDelegatingFormatReader; the declared format must reach the wrapped
+        // CSV reader (a missing wrapper override would silently drop it and diverge from the uncompressed result). The
+        // format/compression is driven by the compound `.csv.gz` extension — an explicit `format` override would bypass
+        // the extension-based compression wrapping entirely, so leave it off.
+        Path gz = createTempFile("dataset-date-fixture-", ".csv.gz");
+        byte[] csv = ("ts:keyword,note:keyword\n10/Oct/2000:13:55:36 -0700,alpha\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try (var out = new java.util.zip.GZIPOutputStream(Files.newOutputStream(gz))) {
+            out.write(csv);
+        }
+        // Non-strict so the format/sourceType is inferred through the extension-based reader (the strict path derives the
+        // sourceType from the file extension and doesn't yet see through a compound `.csv.gz` — a separate, pre-existing
+        // gap unrelated to declared date formats). The overlay retypes the inferred `ts` to a date with the format.
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_csv_gz",
+                    "local_ds",
+                    gz.toUri().toString(),
+                    null,
+                    new HashMap<>(),
+                    mapping
+                )
+            )
+        );
+
+        try (var response = run(syncEsqlQueryRequest("FROM logs_csv_gz | EVAL ms = ts::long | KEEP ms | LIMIT 1"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows.get(0).get(0), equalTo(ACCESS_LOG_EPOCH_MILLIS));
+        }
+    }
+
+    public void testDeclaredDateFormatOnStrictParquetRejected() throws Exception {
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+
+        // A declared date format on a columnar column is rejected in STRICT mode too, not just non-strict — the strict
+        // resolution path bypasses the non-strict overlay's reject, so it must guard the columnar case itself.
+        Path parquet = writeParquetRenameFixture();
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("ts", new DatasetFieldMapping("date", "emp_no", List.of(), ACCESS_LOG_FORMAT));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_parquet_strict_format",
+                    "local_ds",
+                    parquet.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "parquet")),
+                    mapping
+                )
+            )
+        );
+
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM logs_parquet_strict_format | LIMIT 5"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("[format] on column [ts]"));
+        assertThat(e.getMessage(), containsString("parquet"));
     }
 
     public void testNdJsonRenameStrictReadsByPhysicalJsonKey() throws Exception {
