@@ -78,6 +78,7 @@ NONO_ARGS=(
   --profile "${HOME}/.local/pi-agent/nono-pi-agent.json"
   --allow-cwd                # required in non-interactive mode (--startup-timeout 0) even when profile has workdir.access=readwrite
   --allow "${SESSION_DIR}"   # runtime path for JSONL session snapshots; not known at profile-authoring time
+  --read  "${NVM_DIR}"       # pi-agent.js is a shebang script; nono must be able to read the NVM-installed node interpreter
   --startup-timeout 0        # non-interactive — skip TUI-readiness check
   --silent                   # suppress nono banner/summary in CI logs
 )
