@@ -1028,17 +1028,18 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             )
         );
 
+        // _source is not sortable (true for a real index too), so sort on emp_no and KEEP _source alongside it.
         try (
             var response = run(
-                syncEsqlQueryRequest("FROM employees_source_disabled METADATA _source | KEEP _source | SORT _source | LIMIT 10"),
+                syncEsqlQueryRequest("FROM employees_source_disabled METADATA _source | KEEP emp_no, _source | SORT emp_no | LIMIT 10"),
                 TIMEOUT
             )
         ) {
-            assertThat(response.columns().get(0).name(), equalTo("_source"));
+            assertThat(response.columns().get(1).name(), equalTo("_source"));
             List<List<Object>> rows = getValuesList(response);
             assertThat(rows, hasSize(3));
             for (List<Object> row : rows) {
-                assertThat("_source is null when _source.enabled: false", row.get(0), org.hamcrest.Matchers.nullValue());
+                assertThat("_source is null when _source.enabled: false", row.get(1), org.hamcrest.Matchers.nullValue());
             }
         }
     }
