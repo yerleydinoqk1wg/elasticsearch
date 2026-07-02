@@ -21,9 +21,7 @@ import org.elasticsearch.xpack.esql.EsqlIllegalArgumentException;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.util.Check;
-import org.elasticsearch.xpack.esql.core.util.NumericUtils;
 import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractor;
-import org.elasticsearch.xpack.esql.type.EsqlDataTypeConverter;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -416,7 +414,7 @@ final class VirtualColumnIterator implements CloseableIterator<Page> {
      * cell is rendered to its KEYWORD form the way {@code TO_STRING(col)} / the response layer would (DATETIME /
      * DATE_NANOS as ISO strings, IP / VERSION decoded, numerics / booleans stringified, KEYWORD / TEXT passed through),
      * so the stamped {@code _id} reads identically to the column's own value. The rendering mirrors
-     * {@link SynthesizeExternalSource#renderScalar}, keeping {@code _id} and {@code _source} value rendering consistent.
+     * {@link ExternalScalarRenderer#render}, keeping {@code _id} and {@code _source} value rendering consistent.
      */
     private Block composeIdFromColumn(Block idColumnBlock, DataType idColumnType, int positions) {
         try (BytesRefBlock.Builder builder = blockFactory.newBytesRefBlockBuilder(positions)) {
@@ -438,24 +436,12 @@ final class VirtualColumnIterator implements CloseableIterator<Page> {
     }
 
     /**
-     * Renders one scalar {@code _id.path} value to its KEYWORD string form. Mirrors
-     * {@link SynthesizeExternalSource#renderScalar} so a value reads identically as {@code _id} and in the query
-     * output. Types no external reader can emit as a scalar column fail loud so a future type is handled intentionally
-     * rather than discovered as a corrupt {@code _id}.
+     * Renders one scalar {@code _id.path} value to its KEYWORD string form: the shared
+     * {@link ExternalScalarRenderer} produces the native value the response layer would (so {@code _id} and
+     * {@code _source} stay consistent), stringified here because {@code _id} is KEYWORD.
      */
     private static String renderIdScalar(Object value, DataType type) {
-        return switch (type) {
-            case KEYWORD, TEXT -> ((BytesRef) value).utf8ToString();
-            case IP -> EsqlDataTypeConverter.ipToString((BytesRef) value);
-            case VERSION -> EsqlDataTypeConverter.versionToString((BytesRef) value);
-            case DATETIME -> EsqlDataTypeConverter.dateTimeToString((Long) value);
-            case DATE_NANOS -> EsqlDataTypeConverter.nanoTimeToString((Long) value);
-            case UNSIGNED_LONG -> NumericUtils.unsignedLongAsNumber((Long) value).toString();
-            case BOOLEAN, INTEGER, LONG, DOUBLE -> String.valueOf(value);
-            default -> throw new EsqlIllegalArgumentException(
-                "cannot render _id from _id.path column value of type [" + type.typeName() + "]"
-            );
-        };
+        return String.valueOf(ExternalScalarRenderer.render(value, type));
     }
 
     boolean hasPartitionColumns() {
