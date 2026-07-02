@@ -232,7 +232,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "logs_id_partition",
         "logs_partition_collide_nonstrict",
         "logs_partition_collide_path",
-        "employees_strict_mismatch"
+        "employees_strict_mismatch",
+        "employees_strict_mismatch_multi"
     );
 
     /**
@@ -1267,6 +1268,39 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         assertThat(e.getMessage(), containsString("id"));
     }
 
+    public void testStrictColumnarTypeMismatchMultiFileRejected() throws Exception {
+        // Same mismatch as above, but over a MULTI-FILE glob: the multi-file strict path reads ONE anchor file's footer
+        // (listing.path(0) / listing.lastModifiedMillis(0)) to validate — distinct plumbing from the single-file path.
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        Path dir = createTempDir();
+        Files.write(dir.resolve("part1.parquet"), parquetRenameFixtureBytes());
+        Files.write(dir.resolve("part2.parquet"), parquetRenameFixtureBytes());
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical is int64 (long)
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "employees_strict_mismatch_multi",
+                    "local_ds",
+                    dir.toUri() + "*.parquet",
+                    null,
+                    new HashMap<>(Map.of("format", "parquet")),
+                    mapping
+                )
+            )
+        );
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM employees_strict_mismatch_multi | KEEP id | LIMIT 10"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("does not match the file's type"));
+        assertThat(e.getMessage(), containsString("id"));
+    }
+
     public void testParquetStrictCopyToAndFilterPushdown() throws Exception {
         // Strict + columnar + copy: comp (physical salary) is moved AND copied to comp2. The copy is an EVAL above the
         // relation, so it works for parquet exactly as for CSV, and a WHERE on the copy target substitutes back to the
@@ -1405,6 +1439,12 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
     }
 
     private Path writeParquetRenameFixture() throws IOException {
+        Path tempFile = createTempDir().resolve("employees.parquet");
+        Files.write(tempFile, parquetRenameFixtureBytes());
+        return tempFile;
+    }
+
+    private byte[] parquetRenameFixtureBytes() throws IOException {
         MessageType schema = MessageTypeParser.parseMessageType(
             "message employees { required int64 emp_no; required binary first_name (UTF8); required int32 salary;"
                 + " required group dept { required binary code (UTF8); } }"
@@ -1430,9 +1470,7 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 writer.write(g);
             }
         }
-        Path tempFile = createTempDir().resolve("employees.parquet");
-        Files.write(tempFile, baos.toByteArray());
-        return tempFile;
+        return baos.toByteArray();
     }
 
     private static OutputFile createOutputFile(ByteArrayOutputStream baos) {
