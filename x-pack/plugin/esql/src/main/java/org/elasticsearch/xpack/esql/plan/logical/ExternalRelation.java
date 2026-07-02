@@ -262,7 +262,7 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
     }
 
     /**
-     * The declared mapping's read-instructions (renames, {@code _id.path}), or {@link DeclaredReadSpec#NONE}.
+     * The declared mapping's read-instructions (renames, {@code _id.path}, per-column date formats), or {@link DeclaredReadSpec#NONE}.
      * Carried to {@link ExternalSourceExec} via {@link #toPhysicalExec}.
      */
     public DeclaredReadSpec declaredReadSpec() {

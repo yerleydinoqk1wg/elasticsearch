@@ -106,7 +106,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
     // user-facing dataset name without having to re-derive it from cluster state.
     @Nullable
     private final String datasetName;
-    // Declared read-instructions (logical->physical renames, _id.path), or DeclaredReadSpec.NONE. An execution input:
+    // Declared read-instructions (renames, _id.path, per-column date formats), or DeclaredReadSpec.NONE. An execution input:
     // the data-node operator physicalizes reader-facing names and stamps _id from it. Serialized (TV-gated) so the data
     // node needs no cluster-state re-derivation, and carried in info() (like datasetName) so a generic node-reflection
     // rebuild does not silently drop it — the renames used to ride the reflected `config` map and must stay as safe.
@@ -237,7 +237,8 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
     /**
      * Primary constructor that also accepts the transient {@link BlockHash.TopNDef} hint for in-hash TopN pruning
      * and the coordinator-only {@link ExternalSchema} that carries the pre-prune Unified schema. Package-private on purpose
-     * so the public, longest constructor (used by tooling and tree tests) remains the thirteen-arg one above.
+     * so the public, longest constructor (used by tooling and tree tests — {@code EsqlNodeSubclassTests} keys the info()
+     * arity off it) remains the {@code declaredReadSpec}-carrying one below, not this transient-hint shape.
      * Use {@link #withPushedTopN(BlockHash.TopNDef)} and {@link #withUnifiedSchema(ExternalSchema)} from outside the package.
      */
     ExternalSourceExec(

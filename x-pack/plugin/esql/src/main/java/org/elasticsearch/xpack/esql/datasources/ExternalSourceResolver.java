@@ -261,7 +261,8 @@ public class ExternalSourceResolver {
      * column renames; {@code pathsRequiringStats} gates the FIRST_FILE_WINS eager all-file stats aggregation.
      *
      * @param declaredMappings    per-path declared mapping — strict skips inference, non-strict overlays it, and its
-     *        {@code path} renames ride config to the reader boundary; {@code null} when no path declares a mapping.
+     *        derived read-instructions (renames, {@code _id.path}, date formats) ride a typed {@code DeclaredReadSpec} to
+     *        the reader boundary; {@code null} when no path declares a mapping.
      * @param pathsRequiringStats paths whose multi-file FFW resolution must eagerly aggregate global
      *        statistics across all files (the ungrouped-aggregate metadata fast path). A {@code null}
      *        value selects legacy behavior — every path resolves eagerly — preserving existing call
@@ -598,11 +599,13 @@ public class ExternalSourceResolver {
      * Formats whose readers emit blocks in the FILE's own types (self-typed / columnar) rather than parsing text into
      * whatever type the schema requests. For these, a declared retype cannot change what the reader produces — the
      * declared type must equal the reconciled (inferred) type or the query would fail deep in the engine with a block
-     * type mismatch. Text formats (CSV/TSV/NDJSON) parse into the declared type, so they are absent here.
+     * type mismatch. Same reason a declared date {@code format} (a text-parse pattern) is meaningless here. Text formats
+     * (CSV/TSV/NDJSON) parse into the declared type, so they are absent. {@code parquet-rs} is the native parquet reader
+     * (feature-flagged) — columnar like {@code parquet}, so it belongs here too.
      * TODO: this classification belongs on the {@code FormatReader} SPI (a capability method) — move it there with the
-     * typed DeclaredReadSpec carrier; a single documented constant beats threading a new SPI method for two formats.
+     * typed DeclaredReadSpec carrier; a single documented constant beats threading a new SPI method for three formats.
      */
-    private static final Set<String> FILE_TYPED_FORMATS = Set.of("parquet", "orc");
+    private static final Set<String> FILE_TYPED_FORMATS = Set.of("parquet", "orc", FormatNameResolver.FORMAT_PARQUET_RS);
 
     /**
      * Rejects a declared date {@code format} on a columnar ({@code parquet}/{@code orc}) dataset column, for BOTH strict
@@ -1588,7 +1591,7 @@ public class ExternalSourceResolver {
                 // loudly rather than ignore a mapping the user declared.
                 if (declaredReadSpec.isEmpty() == false) {
                     throw new IllegalArgumentException(
-                        "declared mappings with [path] renames or [_id.path] are not supported for this source type"
+                        "declared mappings with [path] renames, [_id.path], or a column [format] are not supported for this source type"
                     );
                 }
                 return extMetadata;
