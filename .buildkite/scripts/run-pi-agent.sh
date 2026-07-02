@@ -74,11 +74,18 @@ Session is initialising…" \
 # Filesystem grants, network allowlist, and vault command block live in the
 # bundled nono-pi-agent.json profile (ships with the pi-agent distro).
 # Only SESSION_DIR is dynamic at runtime and must stay here as a CLI flag.
+# Resolve the nono profile from the repo (relative to this script).
+# Using the repo-local profile rather than the bundled pi-agent one because:
+#   - the bundled profile lacks "extends": "default", so nono has no access to
+#     system paths (/usr/bin/env, libc, etc.) and exits 127 on every shebang exec.
+#   - node_runtime group is required to allow the NVM-installed node interpreter.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NONO_PROFILE="${SCRIPT_DIR}/../nono-pi-agent.json"
+
 NONO_ARGS=(
-  --profile "${HOME}/.local/pi-agent/nono-pi-agent.json"
+  --profile "${NONO_PROFILE}"
   --allow-cwd                # required in non-interactive mode (--startup-timeout 0) even when profile has workdir.access=readwrite
   --allow "${SESSION_DIR}"   # runtime path for JSONL session snapshots; not known at profile-authoring time
-  --read  "${NVM_DIR}"       # pi-agent.js is a shebang script; nono must be able to read the NVM-installed node interpreter
   --startup-timeout 0        # non-interactive — skip TUI-readiness check
   --silent                   # suppress nono banner/summary in CI logs
 )

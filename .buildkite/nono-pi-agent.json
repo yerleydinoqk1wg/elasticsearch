@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "name": "pi-agent",
+    "description": "Sandbox profile for pi-agent CI runs. Vault is explicitly blocked — secrets are injected by the pre-command hook before this sandbox starts and the agent must never be able to read or write Vault directly."
+  },
+  "extends": "default",
+  "groups": {
+    "include": ["node_runtime", "user_caches_linux"],
+    "exclude": ["dangerous_commands", "dangerous_commands_linux", "dangerous_commands_macos"]
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.local/bin",
+      "$HOME/.local/pi-agent",
+      "$HOME/.pi"
+    ]
+  },
+  "network": {
+    "allow_domain": [
+      "elastic.litellm-prod.ai",
+      "api.github.com",
+      "github.com",
+      "api.buildkite.com",
+      "gradle-enterprise.elastic.co"
+    ]
+  },
+  "command_policies": {
+    "commands": {
+      "vault": {
+        "from": {
+          "session": "deny"
+        }
+      }
+    }
+  }
+}
