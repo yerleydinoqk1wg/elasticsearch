@@ -491,8 +491,8 @@ public class ExternalSourceResolver {
         // FormatNameResolver, which applies the same reader-then-format-then-extension precedence (and lowercasing)
         // as the inferred path. A hand-rolled `format` check here would miss both and mis-key the dispatch.
         String sourceType = FormatNameResolver.resolve(config, path);
-        // Strict declarations skip the non-strict overlay's rejectFileTypedRetypes, so guard the columnar-format case here.
-        rejectDeclaredFormatOnColumnar(sourceType, declaredMapping);
+        // Single file => no partition metadata; the combined guard's partition check no-ops on null.
+        rejectDeclaredMappingViolations(sourceType, null, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -553,8 +553,6 @@ public class ExternalSourceResolver {
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
         // Same reader-then-format-then-extension dispatch as the single-file strict path above.
         String sourceType = FormatNameResolver.resolve(config, path);
-        // Strict declarations skip the non-strict overlay's rejectFileTypedRetypes, so guard the columnar-format case here.
-        rejectDeclaredFormatOnColumnar(sourceType, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -567,9 +565,11 @@ public class ExternalSourceResolver {
         // (partition wins, Spark/DuckDB semantics), but under strict the declaration drives the reader's file schema
         // — text formats bind positionally — so silently dropping a declared column would silently re-bind the rest.
         // A declared column colliding with a partition key is rejected instead: partition columns need no declaring.
+        // The combined guard (format-on-columnar + partition collision) the other declaration paths run; strict skips
+        // only rejectFileTypedRetypes, which needs an inferred schema strict never reads.
         PartitionMetadata partitionMetadata = listing.partitionMetadata();
+        rejectDeclaredMappingViolations(sourceType, partitionMetadata, declaredMapping);
         if (partitionMetadata != null && partitionMetadata.isEmpty() == false) {
-            rejectDeclaredPartitionCollision(partitionMetadata, declaredMapping);
             extMetadata = enrichSchemaWithPartitionColumns(extMetadata, partitionMetadata);
         }
 
@@ -597,6 +597,22 @@ public class ExternalSourceResolver {
      * typed DeclaredReadSpec carrier; a single documented constant beats threading a new SPI method for three formats.
      */
     private static final Set<String> FILE_TYPED_FORMATS = Set.of("parquet", "orc", FormatNameResolver.FORMAT_PARQUET_RS);
+
+    /**
+     * The declaration-vs-source violations detectable without reading file content: a declared {@code format} on a
+     * columnar format, and a declared column colliding with a hive partition key. Every declaration resolution path
+     * (strict single/multi and the non-strict overlay) funnels through this one guard so enforcement stays uniform and
+     * a future path cannot silently skip a check. The type-vs-file check ({@link #rejectFileTypedRetypes}) is
+     * non-strict-only because it needs the inferred schema strict never reads.
+     */
+    private static void rejectDeclaredMappingViolations(
+        String sourceType,
+        @Nullable PartitionMetadata partitionMetadata,
+        DatasetMapping declaredMapping
+    ) {
+        rejectDeclaredFormatOnColumnar(sourceType, declaredMapping);
+        rejectDeclaredPartitionCollision(partitionMetadata, declaredMapping);
+    }
 
     /**
      * Rejects a declared date {@code format} on a columnar ({@code parquet}/{@code orc}) dataset column, for BOTH strict
@@ -694,10 +710,15 @@ public class ExternalSourceResolver {
         DatasetMapping declaredMapping
     ) {
         final ExternalSourceMetadata inferred = resolved.metadata();
-        rejectDeclaredFormatOnColumnar(inferred.sourceType(), declaredMapping);
-        // Same partition-collision reject the strict path applies: the inferred schema already carries the partition
-        // columns, so a declared column colliding with a partition key would overlay/retype it and misbind at read time.
-        rejectDeclaredPartitionCollision(resolved.fileList() != null ? resolved.fileList().partitionMetadata() : null, declaredMapping);
+        // Format-on-columnar + partition collision: the same combined guard the strict paths run. The inferred schema
+        // already carries the partition columns, so a declared column colliding with a partition key would
+        // overlay/retype it and misbind at read time.
+        rejectDeclaredMappingViolations(
+            inferred.sourceType(),
+            resolved.fileList() != null ? resolved.fileList().partitionMetadata() : null,
+            declaredMapping
+        );
+        // Non-strict-only: for a self-typed (columnar) reader the declared type must equal the file's inferred type.
         if (FILE_TYPED_FORMATS.contains(inferred.sourceType())) {
             rejectFileTypedRetypes(inferred, declaredMapping);
         }
