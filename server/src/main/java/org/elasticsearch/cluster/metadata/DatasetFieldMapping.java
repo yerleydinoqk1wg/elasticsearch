@@ -44,11 +44,15 @@ import static org.elasticsearch.xcontent.ConstructingObjectParser.optionalConstr
  * {@code actor}. A copy is not a second read: it is materialized as an {@code EVAL target = <this column>} above the
  * external relation (in the ES|QL analyzer), so it works for every format and never touches the read path.
  *
- * <p><b>Binding caveat for text (CSV/TSV):</b> non-strict resolution binds a declared column to the file column of
- * the same physical name (from the header), but strict resolution ({@code dynamic: false}) reads no file and binds
- * <em>positionally</em> — declared order must match the file's column order, and a {@code path} is not cross-checked
- * against a header. So the same declaration can bind to different data under strict vs non-strict for a text file;
- * columnar formats (parquet/orc) bind by name in both modes.
+ * <p><b>Binding contract per format family.</b> Non-strict resolution binds a declared column to the file column of
+ * the same physical name (from the header/keys). Strict resolution ({@code dynamic: false}) reads no file at
+ * declaration time; for <em>text</em> formats (CSV/TSV) it then binds <em>positionally</em> — the declared names
+ * replace the header's names in order (the DuckDB {@code columns=} / ClickHouse {@code structure} contract), so
+ * renaming by position needs no {@code path} and declared names are deliberately not cross-checked against the
+ * header. Two guards keep drifted files loud rather than silently wrong: a declaration <em>wider</em> than a file's
+ * header fails at first read (the file cannot supply the declared columns), and for <em>columnar</em> formats
+ * (parquet/orc, which bind by name and carry their own types) a declared type that differs from the file's
+ * reconciled type is rejected at resolution. Fewer declared columns than the file has leaves the extras unread.
  *
  * <p><b>Type is a plain String here on purpose.</b> {@link Dataset} lives in {@code server} and must not
  * depend on the ES|QL {@code DataType} enum (an x-pack type). The String is validated against the set of

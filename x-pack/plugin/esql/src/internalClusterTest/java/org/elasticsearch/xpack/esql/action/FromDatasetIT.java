@@ -192,7 +192,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "employees_id_renamed",
         "employees_strict_hive",
         "employees_strict_hive_collide",
-        "employees_parquet_type_conflict"
+        "employees_parquet_type_conflict",
+        "employees_strict_wrong_order"
     );
 
     /**
@@ -856,6 +857,41 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 )
             )
         );
+    }
+
+    public void testStrictCsvDeclaredWiderThanFileRejected() throws Exception {
+        // Strict (dynamic: false) binds text columns POSITIONALLY — the declared names replace the header's names in
+        // order (DuckDB columns= / ClickHouse structure semantics), so declared-vs-header NAMES are deliberately not
+        // cross-checked (renaming by position is a feature; see testStrictDeclaredSchemaUsesDeclaredNames...). What
+        // IS checked at first read: a declaration WIDER than the file's header — the file can't supply the declared
+        // columns (drifted file, or the wrong file), so it fails loudly instead of null-splicing every row.
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        java.util.Map<String, DatasetFieldMapping> tooWide = new java.util.LinkedHashMap<>();
+        tooWide.put("emp_no", new DatasetFieldMapping("integer", null));
+        tooWide.put("first_name", new DatasetFieldMapping("keyword", null));
+        tooWide.put("department", new DatasetFieldMapping("keyword", null)); // fixture has only 2 columns
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, tooWide));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "employees_strict_wrong_order",
+                    "local_ds",
+                    csvFixture.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "csv")),
+                    mapping
+                )
+            )
+        );
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM employees_strict_wrong_order | LIMIT 5"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("declared schema has 3 columns"));
+        assertThat(e.getMessage(), containsString("has 2"));
     }
 
     public void testDeclaredTypeConflictingWithPhysicalParquetTypeRejected() throws Exception {

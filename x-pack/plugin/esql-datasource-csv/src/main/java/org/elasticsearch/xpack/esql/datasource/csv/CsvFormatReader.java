@@ -1292,7 +1292,10 @@ public class CsvFormatReader implements SegmentableFormatReader {
         }
         if (readSchema != null) {
             if (context.firstSplit() && options.headerRow()) {
-                skipHeaderLine(recordReader);
+                // The schema was supplied from OUTSIDE the file (a declared mapping) and binds positionally — the
+                // header is otherwise ignored, so a declaration whose order disagrees with the file would silently
+                // read the wrong columns. Cross-check the header names instead of blindly skipping the line.
+                validateDeclaredHeaderBinding(consumeHeaderLine(recordReader), readSchema, object);
             }
             effectiveSchema = readSchema;
         } else if (context.firstSplit()) {
@@ -1301,7 +1304,7 @@ public class CsvFormatReader implements SegmentableFormatReader {
             // recordAligned=true (streaming-parallel pre-bound the FULL file schema from chunk 0).
             if (context.recordAligned() && resolvedSchema != null) {
                 if (options.headerRow()) {
-                    skipHeaderLine(recordReader);
+                    consumeHeaderLine(recordReader);
                 }
                 effectiveSchema = resolvedSchema;
             } else {
@@ -1427,17 +1430,47 @@ public class CsvFormatReader implements SegmentableFormatReader {
 
     /**
      * Consumes one header line from {@code reader}, skipping over leading empty lines and
-     * comment lines. Used by {@link #read} when a schema is already bound but the input split
-     * still starts with the file header.
+     * comment lines, and returns it ({@code null} when the input has no non-comment line).
+     * Used by {@link #read} when a schema is already bound but the input split still starts
+     * with the file header.
      */
-    private void skipHeaderLine(CsvLogicalRecordReader recordReader) throws IOException {
+    private String consumeHeaderLine(CsvLogicalRecordReader recordReader) throws IOException {
         String record;
         while ((record = recordReader.readRecord(false)) != null) {
             String trimmed = record.trim();
             if (trimmed.isEmpty() || (options.commentPrefix().isEmpty() == false && trimmed.startsWith(options.commentPrefix()))) {
                 continue;
             }
-            return;
+            return record;
+        }
+        return null;
+    }
+
+    /**
+     * Width tripwire for an externally-supplied (declared) positional schema against the file's actual header.
+     *
+     * <p>A declared schema binds text columns <b>positionally</b>: the declared names replace the header's names in
+     * order (the same contract as DuckDB {@code columns=} / ClickHouse {@code structure}), so declared names are NOT
+     * cross-checked against header names — renaming by position is intended. What CAN be checked is width: a
+     * declaration WIDER than the file's header means the file cannot supply the declared columns (a drifted file, or
+     * the wrong file entirely) — fail loudly at the first read instead of null-splicing every row. Fewer declared
+     * columns than the header is allowed: the declaration binds the leading columns and the rest stay unread.
+     */
+    private void validateDeclaredHeaderBinding(String headerLine, List<Attribute> readSchema, StorageObject object) {
+        if (headerLine == null) {
+            return; // empty file — nothing to validate, and nothing to read
+        }
+        String[] fields = splitFieldsForOptions(headerLine, options);
+        if (readSchema.size() > fields.length) {
+            throw new IllegalArgumentException(
+                "declared schema has "
+                    + readSchema.size()
+                    + " columns but the header of ["
+                    + object.path()
+                    + "] has "
+                    + fields.length
+                    + "; a declared schema binds text columns in order (for a headerless file set header_row=false)"
+            );
         }
     }
 
