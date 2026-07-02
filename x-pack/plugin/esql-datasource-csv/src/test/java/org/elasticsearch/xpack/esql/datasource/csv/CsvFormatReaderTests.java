@@ -455,6 +455,26 @@ public class CsvFormatReaderTests extends ESTestCase {
         }
     }
 
+    public void testReadDeclaredDateFormatMultiValueBrackets() throws IOException {
+        // A declared format applies per element inside a bracketed multi-value datetime cell: both
+        // `10/Oct/2000:...` and `11/Oct/2000:...` are parsed zone-aware with the declared pattern, one day apart.
+        String csv = "id:integer,ts:datetime\n1,\"[10/Oct/2000:13:55:36 -0700,11/Oct/2000:13:55:36 -0700]\"\n";
+        StorageObject object = createStorageObject(csv);
+        CsvFormatReader reader = ((CsvFormatReader) new CsvFormatReader(blockFactory).withConfig(Map.of("multi_value_syntax", "brackets")))
+            .withDeclaredDateFormats(Map.of("ts", "dd/MMM/yyyy:HH:mm:ss Z"));
+
+        try (CloseableIterator<Page> iterator = reader.read(object, null, 10)) {
+            assertTrue(iterator.hasNext());
+            Page page = iterator.next();
+            assertEquals(1, page.getPositionCount());
+            LongBlock ts = (LongBlock) page.getBlock(1);
+            assertEquals(2, ts.getValueCount(0));
+            int idx = ts.getFirstValueIndex(0);
+            assertEquals(971211336000L, ts.getLong(idx));
+            assertEquals(971211336000L + 86_400_000L, ts.getLong(idx + 1)); // one day later
+        }
+    }
+
     public void testReadDatetimeMixed() throws IOException {
         long epochMillis = 1609459200000L; // 2021-01-01T00:00:00.000Z
         String csv = "id:long,ts:datetime\n1," + epochMillis + "\n2,1953-09-02T00:00:00.000Z\n";
