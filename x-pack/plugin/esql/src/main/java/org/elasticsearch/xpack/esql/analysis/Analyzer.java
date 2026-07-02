@@ -73,6 +73,7 @@ import org.elasticsearch.xpack.esql.core.util.Holder;
 import org.elasticsearch.xpack.esql.core.util.StringUtils;
 import org.elasticsearch.xpack.esql.datasources.ExternalMetadataColumns;
 import org.elasticsearch.xpack.esql.datasources.FileMetadataColumns;
+import org.elasticsearch.xpack.esql.datasources.PartitionMetadata;
 import org.elasticsearch.xpack.esql.expression.NamedExpressions;
 import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.expression.UnresolvedNamePattern;
@@ -684,7 +685,14 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
             }
 
             var metadata = resolvedSource.metadata();
-            MetadataBindResult bindResult = bindMetadataFields(plan, metadata.schema());
+            // Partition columns are path-derived and appear in the schema as plain ReferenceAttributes (indistinguishable
+            // from data columns by type), so pass their names explicitly: _id.path pointing at a partition column must be
+            // rejected loudly (the reader stamps _id per row from a data column, not from a path-derived constant).
+            PartitionMetadata partitionMetadata = resolvedSource.fileList() != null ? resolvedSource.fileList().partitionMetadata() : null;
+            Set<String> partitionColumnNames = partitionMetadata != null && partitionMetadata.isEmpty() == false
+                ? partitionMetadata.partitionColumns().keySet()
+                : Set.of();
+            MetadataBindResult bindResult = bindMetadataFields(plan, metadata.schema(), partitionColumnNames);
             ExternalRelation relation = new ExternalRelation(
                 plan.source(),
                 tablePath,
@@ -772,7 +780,11 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
          * present in the source's natural schema are skipped (the source's own column takes
          * precedence).
          */
-        private static MetadataBindResult bindMetadataFields(UnresolvedExternalRelation plan, List<Attribute> baseSchema) {
+        private static MetadataBindResult bindMetadataFields(
+            UnresolvedExternalRelation plan,
+            List<Attribute> baseSchema,
+            Set<String> partitionColumnNames
+        ) {
             if (plan.metadataFields().isEmpty()) {
                 return new MetadataBindResult(baseSchema, List.of());
             }
@@ -819,7 +831,12 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                                     + "] (mappings._id.path), but no such column exists in the dataset's schema"
                             );
                         }
-                        if (idSource instanceof VirtualAttribute || idSource instanceof ExternalMetadataAttribute) {
+                        // A partition column is a path-derived constant surfaced as a plain ReferenceAttribute (not a
+                        // Virtual/ExternalMetadata attribute), so it slips the type checks above; the reader classifies
+                        // it in the partition branch and never stamps _id from it (silent null id). Reject it here.
+                        if (idSource instanceof VirtualAttribute
+                            || idSource instanceof ExternalMetadataAttribute
+                            || partitionColumnNames.contains(idPath)) {
                             throw new IllegalArgumentException(
                                 "[_id] is declared to come from ["
                                     + idPath

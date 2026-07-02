@@ -228,7 +228,9 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "logs_csv_gz",
         "logs_parquet_strict_format",
         "logs_noext_strict",
-        "employees_extensionless"
+        "employees_extensionless",
+        "logs_id_partition",
+        "logs_partition_collide_nonstrict"
     );
 
     /**
@@ -1086,6 +1088,28 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             assertThat(rows, hasSize(2));
             assertThat(rows.get(0).get(0), equalTo(3L)); // Carol comp=300
             assertThat(rows.get(1).get(0), equalTo(2L)); // Bob comp=200
+        }
+    }
+
+    public void testParquetRenameDeferredExtractionOnRenamedColumns() throws Exception {
+        // A TopN keeping >= DEFERRED_COLUMN_MIN (3) non-sort columns over a ColumnExtractorAware parquet source defers
+        // their extraction until after the top rows are chosen. Deferred columns are pulled from the file by name, so a
+        // `path` rename must physicalize them too — otherwise the extractor looks up the logical names (id/name/dept_code)
+        // which the file doesn't have (emp_no/first_name/dept.code) and fails "column [id] is missing".
+        putParquetRenameDataset("employees_parquet_rename", writeParquetRenameFixture());
+        try (
+            var response = run(
+                syncEsqlQueryRequest("FROM employees_parquet_rename | SORT comp DESC | KEEP id, name, dept_code | LIMIT 2"),
+                TIMEOUT
+            )
+        ) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows, hasSize(2));
+            assertThat(rows.get(0).get(0), equalTo(3L));                 // Carol, emp_no=3, comp=300
+            assertThat(rows.get(0).get(1).toString(), equalTo("Carol"));
+            assertThat(rows.get(0).get(2).toString(), equalTo("OPS"));   // dept_code from dotted dept.code
+            assertThat(rows.get(1).get(0), equalTo(2L));                 // Bob, emp_no=2, comp=200
+            assertThat(rows.get(1).get(1).toString(), equalTo("Bob"));
         }
     }
 
@@ -2277,6 +2301,80 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             }
             assertThat(rows.get(0).get(uidIdx).toString(), equalTo("Alice"));
         }
+    }
+
+    public void testIdPathOnPartitionColumnRejected() throws Exception {
+        // _id.path naming a partition column is rejected loudly: a partition value is a path-derived constant surfaced
+        // as a plain data-looking column, but the reader classifies it in the partition branch and never stamps _id from
+        // it — pointing _id there would silently yield null ids for every row.
+        Path root = createTempDir();
+        Path east = Files.createDirectories(root.resolve("region=east"));
+        Files.writeString(east.resolve("part1.csv"), "emp_no:integer,first_name:keyword\n1,Alice\n2,Bob\n");
+
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        java.util.Map<String, DatasetFieldMapping> props = new java.util.LinkedHashMap<>();
+        props.put("emp_no", new DatasetFieldMapping("integer", null));
+        props.put("first_name", new DatasetFieldMapping("keyword", null));
+        // Non-strict, _id.path = region (the partition key). PUT accepts (non-strict defers the id-column existence
+        // check); the reject fires at query time when _id is actually requested.
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, props, null, "region"));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_id_partition",
+                    "local_ds",
+                    root.toUri() + "**/*.csv",
+                    null,
+                    new HashMap<>(Map.of("format", "csv", "hive_partitioning", true)),
+                    mapping
+                )
+            )
+        );
+
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM logs_id_partition METADATA _id | KEEP _id | LIMIT 1"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("[_id]"));
+        assertThat(e.getMessage(), containsString("region"));
+    }
+
+    public void testNonStrictPartitionKeyCollisionRejected() throws Exception {
+        // Non-strict: a declared column whose name collides with a partition key is rejected, same as strict — otherwise
+        // it would overlay/retype the path-derived partition attribute and misbind (block-type mismatch) at read time.
+        Path root = createTempDir();
+        Path east = Files.createDirectories(root.resolve("region=east"));
+        Files.writeString(east.resolve("part1.csv"), "emp_no:integer,first_name:keyword\n1,Alice\n2,Bob\n");
+
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        java.util.Map<String, DatasetFieldMapping> props = new java.util.LinkedHashMap<>();
+        props.put("region", new DatasetFieldMapping("integer", null)); // collides with the partition key "region"
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, props));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_partition_collide_nonstrict",
+                    "local_ds",
+                    root.toUri() + "**/*.csv",
+                    null,
+                    new HashMap<>(Map.of("format", "csv", "hive_partitioning", true)),
+                    mapping
+                )
+            )
+        );
+
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM logs_partition_collide_nonstrict | LIMIT 1"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("collides with a partition column"));
+        assertThat(e.getMessage(), containsString("region"));
     }
 
     public void testStrictHivePartitionedGlob() throws Exception {

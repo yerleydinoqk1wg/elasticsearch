@@ -569,16 +569,7 @@ public class ExternalSourceResolver {
         // A declared column colliding with a partition key is rejected instead: partition columns need no declaring.
         PartitionMetadata partitionMetadata = listing.partitionMetadata();
         if (partitionMetadata != null && partitionMetadata.isEmpty() == false) {
-            for (Attribute declared : logicalSchema) {
-                if (partitionMetadata.partitionColumns().containsKey(declared.name())) {
-                    throw new IllegalArgumentException(
-                        "declared column ["
-                            + declared.name()
-                            + "] collides with a partition column derived from the path; partition columns are "
-                            + "path-derived and must not be declared under [properties]"
-                    );
-                }
-            }
+            rejectDeclaredPartitionCollision(partitionMetadata, declaredMapping);
             extMetadata = enrichSchemaWithPartitionColumns(extMetadata, partitionMetadata);
         }
 
@@ -643,6 +634,33 @@ public class ExternalSourceResolver {
      * type mismatch deep in the engine. Reject it here, at resolution, with an actionable message instead. (Casting a
      * columnar column to a different declared type is a natural later increment on this same seam.)
      */
+    /**
+     * Rejects a declared column that collides with a hive partition key, for BOTH strict and non-strict declarations. A
+     * partition column is path-derived (the partition value is the same for every row of a file) and needs no declaring;
+     * declaring one either silently re-binds the positional text columns (strict) or overlays/retypes the partition
+     * attribute against the value the injector stamps with the partition's own type (non-strict) — a silent misbind
+     * either way. Checks both the declared logical name and its {@code path} physical, since the shadowed physical
+     * column is the partition value too. No-op when the dataset is not partitioned.
+     */
+    private static void rejectDeclaredPartitionCollision(PartitionMetadata partitionMetadata, DatasetMapping declaredMapping) {
+        if (partitionMetadata == null || partitionMetadata.isEmpty() || declaredMapping == null || declaredMapping.mappings() == null) {
+            return;
+        }
+        Map<String, DataType> partitionColumns = partitionMetadata.partitionColumns();
+        for (Map.Entry<String, DatasetFieldMapping> e : declaredMapping.mappings().properties().entrySet()) {
+            String logical = e.getKey();
+            String physical = e.getValue().path() != null ? e.getValue().path() : logical;
+            if (partitionColumns.containsKey(logical) || partitionColumns.containsKey(physical)) {
+                throw new IllegalArgumentException(
+                    "declared column ["
+                        + logical
+                        + "] collides with a partition column derived from the path; partition columns are "
+                        + "path-derived and must not be declared under [properties]"
+                );
+            }
+        }
+    }
+
     private static void rejectFileTypedRetypes(ExternalSourceMetadata inferred, DatasetMapping declaredMapping) {
         Map<String, DataType> inferredTypes = new HashMap<>();
         for (Attribute a : inferred.schema()) {
@@ -677,6 +695,9 @@ public class ExternalSourceResolver {
     ) {
         final ExternalSourceMetadata inferred = resolved.metadata();
         rejectDeclaredFormatOnColumnar(inferred.sourceType(), declaredMapping);
+        // Same partition-collision reject the strict path applies: the inferred schema already carries the partition
+        // columns, so a declared column colliding with a partition key would overlay/retype it and misbind at read time.
+        rejectDeclaredPartitionCollision(resolved.fileList() != null ? resolved.fileList().partitionMetadata() : null, declaredMapping);
         if (FILE_TYPED_FORMATS.contains(inferred.sourceType())) {
             rejectFileTypedRetypes(inferred, declaredMapping);
         }

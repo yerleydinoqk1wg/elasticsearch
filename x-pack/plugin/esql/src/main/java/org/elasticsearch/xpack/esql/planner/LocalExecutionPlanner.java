@@ -126,6 +126,7 @@ import org.elasticsearch.xpack.esql.datasources.ExternalSliceQueue;
 import org.elasticsearch.xpack.esql.datasources.FileMetadataColumns;
 import org.elasticsearch.xpack.esql.datasources.OperatorFactoryRegistry;
 import org.elasticsearch.xpack.esql.datasources.PartitionMetadata;
+import org.elasticsearch.xpack.esql.datasources.PhysicalNames;
 import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractor;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -672,9 +673,20 @@ public class LocalExecutionPlanner {
         layoutBuilder.append(exec.attributesToExtract());
         Layout newLayout = layoutBuilder.build();
 
+        // Deferred columns are pulled from the source file by name, and a columnar extractor resolves them against the
+        // FILE's own (physical) schema — so a declared `path` rename must be applied here too, exactly as the eager
+        // projection is. Physicalize through the same PhysicalNames chokepoint the source reader used; without this a
+        // deferred renamed column (not in the eager projection) fails at extract time with "column [x] is missing".
+        Map<String, String> deferredRenames = Map.of();
+        for (PhysicalPlan p = exec.child(); p != null; p = (p instanceof UnaryExec u) ? u.child() : null) {
+            if (p instanceof ExternalSourceExec ese) {
+                deferredRenames = ese.declaredReadSpec().renames();
+                break;
+            }
+        }
         List<String> deferredColumnNames = new ArrayList<>(exec.attributesToExtract().size());
         for (Attribute a : exec.attributesToExtract()) {
-            deferredColumnNames.add(a.name());
+            deferredColumnNames.add(PhysicalNames.translate(a.name(), deferredRenames));
         }
 
         ExternalFieldExtractOperator.Factory factory = new ExternalFieldExtractOperator.Factory(

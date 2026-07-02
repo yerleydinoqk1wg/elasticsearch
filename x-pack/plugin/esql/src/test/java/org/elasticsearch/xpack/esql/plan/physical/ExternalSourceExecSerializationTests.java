@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 
@@ -236,14 +237,14 @@ public class ExternalSourceExecSerializationTests extends AbstractPhysicalPlanSe
     }
 
     /**
-     * A target node predating {@code dataset_declared_schema} cannot deserialize the spec, so the coordinator omits
-     * it and the node falls back to {@link DeclaredReadSpec#NONE} (declared renames / {@code _id.path} do not apply).
+     * A NON-empty spec toward a target node predating {@code dataset_declared_schema} is rejected loudly rather than
+     * silently dropped — dropping it would return wrong rows (physical names, synthetic _id, unparsed dates).
      */
-    public void testDeclaredReadSpecDroppedForOlderTransportVersion() throws IOException {
+    public void testDeclaredReadSpecRejectedForOlderTransportVersion() throws IOException {
         DeclaredReadSpec spec = DeclaredReadSpec.of(Map.of("id", "emp_no"), "id");
         ExternalSourceExec original = randomExternalSourceExec().withDeclaredReadSpec(spec);
         TransportVersion before = TransportVersionUtils.getPreviousVersion(TransportVersion.fromName("dataset_declared_schema"));
-        ExternalSourceExec roundTripped = copyInstance(original, before);
-        assertThat(roundTripped.declaredReadSpec(), equalTo(DeclaredReadSpec.NONE));
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> copyInstance(original, before));
+        assertThat(e.getMessage(), containsString("not supported on all nodes"));
     }
 }

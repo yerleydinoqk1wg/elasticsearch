@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 public class ExternalRelationSerializationTests extends AbstractLogicalPlanSerializationTests<ExternalRelation> {
@@ -139,8 +140,11 @@ public class ExternalRelationSerializationTests extends AbstractLogicalPlanSeria
         assertThat(roundTripped.declaredReadSpec(), equalTo(spec));
     }
 
-    /** A node predating {@code dataset_declared_schema} falls back to {@link DeclaredReadSpec#NONE}. */
-    public void testDeclaredReadSpecDroppedForOlderTransportVersion() throws IOException {
+    /**
+     * Serializing a NON-empty spec toward a node predating {@code dataset_declared_schema} is rejected loudly rather
+     * than silently dropped — dropping it would return wrong rows (physical names, synthetic _id) on the old node.
+     */
+    public void testDeclaredReadSpecRejectedForOlderTransportVersion() throws IOException {
         DeclaredReadSpec spec = DeclaredReadSpec.of(Map.of("id", "emp_no"), "id");
         List<Attribute> output = randomFieldAttributes(1, 3, false);
         SimpleSourceMetadata metadata = new SimpleSourceMetadata(output, "csv", "s3://bucket/x.csv", null, null, Map.of(), Map.of());
@@ -156,7 +160,7 @@ public class ExternalRelationSerializationTests extends AbstractLogicalPlanSeria
             spec
         );
         TransportVersion before = TransportVersionUtils.getPreviousVersion(TransportVersion.fromName("dataset_declared_schema"));
-        ExternalRelation roundTripped = copyInstance(original, before);
-        assertThat(roundTripped.declaredReadSpec(), equalTo(DeclaredReadSpec.NONE));
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> copyInstance(original, before));
+        assertThat(e.getMessage(), containsString("not supported on all nodes"));
     }
 }

@@ -23,8 +23,9 @@ import java.util.Map;
  * {@link FilterAdaptation}), projection intersection — works in <b>logical</b> names. A {@code path} rename is
  * applied only at the last mile, on the names handed to a format reader or its pushdown SPI, so readers are fully
  * rename-agnostic and reconciliation is never disturbed. Every reader-facing name surface (projection, read schema,
- * pushed filter, TopN threshold, aggregate-stats refs) routes its names through this class; deferred extraction rides
- * the already-physical projected columns and needs no separate translation.
+ * pushed filter, TopN threshold, aggregate-stats refs, deferred field-extraction column names) routes its names through
+ * this class — including the deferred columns, which are extracted from the file by name after the eager projection and
+ * so need the same physicalization ({@code LocalExecutionPlanner#planExternalFieldExtract}).
  *
  * <p>Names are treated as <b>opaque whole strings</b>: a dotted name ({@code a.b.c}) is a single flat column name in
  * this model and is never split here (a reader that navigates dots does so on the physical name it receives).
