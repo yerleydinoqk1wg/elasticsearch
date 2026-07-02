@@ -493,6 +493,7 @@ public class ExternalSourceResolver {
         String sourceType = FormatNameResolver.resolve(config, path);
         // Single file => no partition metadata; the combined guard's partition check no-ops on null.
         rejectDeclaredMappingViolations(sourceType, null, declaredMapping);
+        rejectStrictColumnarTypeMismatch(sourceType, path, config, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -553,6 +554,8 @@ public class ExternalSourceResolver {
         List<Attribute> logicalSchema = DeclaredSchemaResolver.declaredAttributes(declaredMapping);
         // Same reader-then-format-then-extension dispatch as the single-file strict path above.
         String sourceType = FormatNameResolver.resolve(config, path);
+        // Columnar strict: validate declared types against one anchor file's physical schema (silent-null trap).
+        rejectStrictColumnarTypeMismatch(sourceType, listing.path(0).toString(), config, declaredMapping);
         ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(
             new SimpleSourceMetadata(logicalSchema, sourceType, path),
             config,
@@ -675,6 +678,31 @@ public class ExternalSourceResolver {
                 );
             }
         }
+    }
+
+    /**
+     * For a STRICT declaration on a columnar (file-typed) format, validate the declared column types against the file's
+     * physical schema. Strict builds its output purely from the declaration and never reads content, but a columnar
+     * reader emits the file's OWN types — so a declared type that differs from the physical type does not error and does
+     * not reinterpret; it yields silent nulls. Read the physical schema (of a single anchor file, cached upstream by the
+     * same schema cache the non-strict path uses) and run the same type check the non-strict overlay runs, turning the
+     * silent-null trap into an actionable resolution error. No-op for text formats, which parse into the declared type.
+     */
+    private void rejectStrictColumnarTypeMismatch(
+        String sourceType,
+        String anchorPath,
+        Map<String, Object> config,
+        DatasetMapping declaredMapping
+    ) throws Exception {
+        if (sourceType == null || FILE_TYPED_FORMATS.contains(sourceType) == false || declaredMapping.mappings() == null) {
+            return;
+        }
+        ExternalSourceMetadata inferred = wrapAsExternalSourceMetadata(
+            resolveSingleSource(anchorPath, config),
+            config,
+            DeclaredReadSpec.NONE
+        );
+        rejectFileTypedRetypes(inferred, declaredMapping);
     }
 
     private static void rejectFileTypedRetypes(ExternalSourceMetadata inferred, DatasetMapping declaredMapping) {

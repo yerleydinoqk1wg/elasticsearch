@@ -231,7 +231,8 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "employees_extensionless",
         "logs_id_partition",
         "logs_partition_collide_nonstrict",
-        "logs_partition_collide_path"
+        "logs_partition_collide_path",
+        "employees_strict_mismatch"
     );
 
     /**
@@ -1232,6 +1233,38 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             }
         });
         assertThat(e.getMessage(), containsString("collides with an existing column"));
+    }
+
+    public void testStrictColumnarTypeMismatchRejected() throws Exception {
+        // Strict + columnar: declaring the physical int64 `emp_no` as DATETIME is a type mismatch. Both are LongBlock-
+        // backed, so the columnar reader neither errors nor reinterprets — it yields silent nulls. Validate the declared
+        // types against the file's physical schema at resolution and reject with an actionable message instead.
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        Path parquet = writeParquetRenameFixture();
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical is int64 (long)
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "employees_strict_mismatch",
+                    "local_ds",
+                    parquet.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "parquet")),
+                    mapping
+                )
+            )
+        );
+        Exception e = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM employees_strict_mismatch | KEEP id | LIMIT 10"), TIMEOUT).close()
+        );
+        assertThat(e.getMessage(), containsString("does not match the file's type"));
+        assertThat(e.getMessage(), containsString("id"));
     }
 
     public void testParquetStrictCopyToAndFilterPushdown() throws Exception {
