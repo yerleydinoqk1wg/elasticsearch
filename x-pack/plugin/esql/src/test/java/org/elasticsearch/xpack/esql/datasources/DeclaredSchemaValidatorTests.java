@@ -15,6 +15,7 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class DeclaredSchemaValidatorTests extends ESTestCase {
@@ -41,6 +42,36 @@ public class DeclaredSchemaValidatorTests extends ESTestCase {
         Map<String, DatasetFieldMapping> copyTo = new LinkedHashMap<>();
         copyTo.put("ts", new DatasetFieldMapping("date", null, "@timestamp"));
         DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, copyTo))); // no throw
+    }
+
+    public void testFormatOnDateColumnAcceptedAtPut() {
+        // A date-parse pattern on a `date` column is shape-valid at PUT; the pattern is validated with the same ES
+        // DateFormatter the readers use.
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("ts", new DatasetFieldMapping("date", null, List.of(), "dd/MMM/yyyy:HH:mm:ss Z"));
+        DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, props))); // no throw
+    }
+
+    public void testFormatOnNonDateColumnRejected() {
+        // `format` is a date-parse pattern, so it is only meaningful on a date column.
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("name", new DatasetFieldMapping("keyword", null, List.of(), "yyyy-MM-dd"));
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, props)))
+        );
+        assertTrue(e.getMessage(), e.getMessage().contains("[format] on column [name] is only supported on [date] columns"));
+    }
+
+    public void testInvalidFormatPatternRejectedAtPut() {
+        // A bad pattern must fail the PUT, not the first query.
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("ts", new DatasetFieldMapping("date", null, List.of(), "not-a-valid-pattern-{{{"));
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> DeclaredSchemaValidator.validate(new DatasetMapping(new Mappings(Dynamic.TRUE, props)))
+        );
+        assertTrue(e.getMessage(), e.getMessage().contains("invalid [format]"));
     }
 
     public void testTwoSourcesOntoOnePhysicalRejected() {

@@ -9,6 +9,7 @@ package org.elasticsearch.xpack.esql.datasources;
 
 import org.elasticsearch.cluster.metadata.DatasetFieldMapping;
 import org.elasticsearch.cluster.metadata.DatasetMapping;
+import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 
 import java.util.HashMap;
@@ -75,6 +76,7 @@ public final class DeclaredSchemaValidator {
                 requireNonBlank(e.getKey(), "column name");
                 requireNonBlank(e.getValue().path(), "path of column [" + e.getKey() + "]");
                 validateType(e.getKey(), e.getValue().type());
+                validateFormat(e.getKey(), e.getValue().type(), e.getValue().format());
                 outputNames.add(e.getKey()); // property keys are unique by JSON-object semantics
                 String logical = e.getKey();
                 String physical = e.getValue().path() != null ? e.getValue().path() : logical;
@@ -127,6 +129,26 @@ public final class DeclaredSchemaValidator {
             throw new IllegalArgumentException(
                 "unsupported declared type [" + type + "] for column [" + column + "]; supported types are " + supportedTypeNames()
             );
+        }
+    }
+
+    /**
+     * A declared {@code format} is a date-parse pattern, so it is only accepted on a column whose type resolves to
+     * {@code datetime} ({@code date_nanos} is not a declarable type). The pattern itself is validated here with the
+     * same ES {@link DateFormatter#forPattern} the readers use, so a bad pattern fails the PUT rather than the first
+     * query — and PUT-accepted implies read-parseable (increment 3 parses with the same formatter class).
+     */
+    private static void validateFormat(String column, String type, String format) {
+        if (format == null) {
+            return;
+        }
+        if (DataType.fromNameOrAlias(type) != DataType.DATETIME) {
+            throw new IllegalArgumentException("[format] on column [" + column + "] is only supported on [date] columns");
+        }
+        try {
+            DateFormatter.forPattern(format);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("invalid [format] [" + format + "] on column [" + column + "]", e);
         }
     }
 
