@@ -1430,7 +1430,15 @@ public class OrcFormatReader implements RangeAwareFormatReader, NoConfigFormatRe
                     if (vector == null) {
                         continue;
                     }
-                    blocks[col] = createBlock(vector, dataType, rowCount, ancestorNulls, leafTypes[col], declaredFormatters[col], fieldName);
+                    blocks[col] = createBlock(
+                        vector,
+                        dataType,
+                        rowCount,
+                        ancestorNulls,
+                        leafTypes[col],
+                        declaredFormatters[col],
+                        fieldName
+                    );
                 } catch (Exception e) {
                     Releasables.closeExpectNoException(blocks);
                     throw e;
@@ -1518,7 +1526,9 @@ public class OrcFormatReader implements RangeAwareFormatReader, NoConfigFormatRe
         private SkipWarnings coercionWarnings() {
             if (coercionWarnings == null) {
                 coercionWarnings = new SkipWarnings(
-                    "ORC file [" + fileLocation + "] has values that could not be coerced to the declared column type; "
+                    "ORC file ["
+                        + fileLocation
+                        + "] has values that could not be coerced to the declared column type; "
                         + "they are returned as null"
                 );
             }
