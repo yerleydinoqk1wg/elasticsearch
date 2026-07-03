@@ -1718,13 +1718,13 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
     }
 
     public void testDeclaredTypeConflictingWithPhysicalParquetTypeRejected() throws Exception {
-        // Parquet columns carry their own type. A declared type with a defined read-time coercion (e.g. long->datetime)
-        // is coerced; one with NO coercion (long->keyword here) is rejected at resolution with an actionable message
-        // rather than dying deep in the engine or reading as silent null.
+        // Parquet columns carry their own type. A declared type with a defined read-time coercion (e.g. long->datetime,
+        // long->keyword) is coerced; one with NO coercion (long->ip here — the ip mapper only ingests string tokens) is
+        // rejected at resolution with an actionable message rather than dying deep in the engine or reading as silent null.
         Path parquet = writeParquetRenameFixture();
         assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
         java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
-        properties.put("emp_no", new DatasetFieldMapping("keyword", null)); // physical int64!
+        properties.put("emp_no", new DatasetFieldMapping("ip", null)); // physical int64!
         properties.put("first_name", new DatasetFieldMapping("keyword", null));
         DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, properties));
         assertAcked(
