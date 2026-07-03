@@ -1498,7 +1498,11 @@ public class ParquetFormatReader implements RangeAwareFormatReader, ColumnExtrac
                     desc.getMaxDefinitionLevel(),
                     desc.getMaxRepetitionLevel(),
                     logicalType,
-                    declaredPattern != null ? DateFormatter.forPattern(declaredPattern) : null
+                    declaredPattern != null ? DateFormatter.forPattern(declaredPattern) : null,
+                    // The file's own ESQL rendering of the leaf primitive (the element type for LIST
+                    // columns) — the physical half of a declared-type coercion. When it differs from
+                    // the attribute's declared type, the decode paths read at this type and coerce.
+                    convertParquetTypeToEsql(desc.getPrimitiveType())
                 );
             }
         }
@@ -1962,6 +1966,22 @@ public class ParquetFormatReader implements RangeAwareFormatReader, ColumnExtrac
         private boolean exhausted = false;
         private int rowGroupOrdinal = -1;
         private int pageBatchIndexInRowGroup = 0;
+        /**
+         * Lazily-created sink for per-value declared-coercion failures (capped response Warning
+         * headers + nulled cells); shared by every column and row group of this iterator so the
+         * cap is per read, not per column chunk.
+         */
+        private SkipWarnings coercionWarnings;
+
+        private SkipWarnings coercionWarnings() {
+            if (coercionWarnings == null) {
+                coercionWarnings = new SkipWarnings(
+                    "Parquet file [" + fileLocation + "] has values that could not be coerced to the declared column type; "
+                        + "they are returned as null"
+                );
+            }
+            return coercionWarnings;
+        }
 
         ParquetColumnIterator(
             ParquetFileReader reader,
@@ -2083,7 +2103,7 @@ public class ParquetFormatReader implements RangeAwareFormatReader, ColumnExtrac
                     ColumnInfo ci = columnInfos[i];
                     if (ci != null && ci.isRowPosition() == false && ci.maxRepLevel() == 0) {
                         PageReader pageReader = rowGroup.getPageReader(ci.descriptor());
-                        pageColumnReaders[i] = new PageColumnReader(pageReader, ci.descriptor(), ci, allRows);
+                        pageColumnReaders[i] = new PageColumnReader(pageReader, ci.descriptor(), ci, allRows, coercionWarnings());
                     }
                 }
             } else {
@@ -2220,6 +2240,30 @@ public class ParquetFormatReader implements RangeAwareFormatReader, ColumnExtrac
         }
 
         private Block readColumnBlock(ColumnReader cr, ColumnInfo info, int rowsToRead, int colIndex) {
+            // Declared-type coercion beyond the fused pairs: decode the column at the file's own
+            // type with the arms below, then coerce the block to the declared type (bulk-API
+            // leniency: an unconvertible value nulls its cell and emits a response Warning).
+            DataType declared = info.esqlType();
+            DataType fileType = info.fileEsqlType();
+            if (fileType != null
+                && declared != fileType
+                && DeclaredTypeCoercions.fusedInDecode(fileType, declared) == false
+                && DeclaredTypeCoercions.supports(fileType, declared)) {
+                Block physical = readColumnBlock(cr, info.fileTyped(), rowsToRead, colIndex);
+                try {
+                    return DeclaredTypeCoercions.castBlock(
+                        physical,
+                        fileType,
+                        declared,
+                        info.dateFormatter(),
+                        blockFactory,
+                        attributes.get(colIndex).name(),
+                        coercionWarnings()
+                    );
+                } finally {
+                    physical.close();
+                }
+            }
             if (info.maxRepLevel() > 0) {
                 return ParquetColumnDecoding.readListColumn(cr, info, rowsToRead, blockFactory);
             }

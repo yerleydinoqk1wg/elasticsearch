@@ -25,6 +25,7 @@ import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.util.NumericUtils;
 import org.elasticsearch.xpack.esql.datasources.spi.DeclaredTypeCoercions;
+import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -247,6 +248,44 @@ final class ParquetColumnDecoding {
      * as a constant null block.
      */
     static Block readListColumn(ColumnReader cr, ColumnInfo info, int rows, BlockFactory blockFactory) {
+        return readListColumn(cr, info, rows, blockFactory, null, null);
+    }
+
+    /**
+     * As {@link #readListColumn(ColumnReader, ColumnInfo, int, BlockFactory)}, coercing a
+     * declared element type beyond the fused pairs: the list decodes at the file's own element
+     * type, then {@link DeclaredTypeCoercions#castBlock} coerces each element to the declared
+     * type ({@code warnings} carries the per-value failure sink; {@code null} = strict).
+     */
+    static Block readListColumn(
+        ColumnReader cr,
+        ColumnInfo info,
+        int rows,
+        BlockFactory blockFactory,
+        @Nullable String columnName,
+        @Nullable SkipWarnings warnings
+    ) {
+        DataType declared = info.esqlType();
+        DataType fileElementType = info.fileEsqlType();
+        if (fileElementType != null
+            && declared != fileElementType
+            && DeclaredTypeCoercions.fusedInDecode(fileElementType, declared) == false
+            && DeclaredTypeCoercions.supports(fileElementType, declared)) {
+            Block physical = readListColumn(cr, info.fileTyped(), rows, blockFactory);
+            try {
+                return DeclaredTypeCoercions.castBlock(
+                    physical,
+                    fileElementType,
+                    declared,
+                    info.dateFormatter(),
+                    blockFactory,
+                    columnName,
+                    warnings
+                );
+            } finally {
+                physical.close();
+            }
+        }
         DataType elementType = info.esqlType();
         int maxDef = info.maxDefLevel();
         return switch (elementType) {

@@ -20,9 +20,12 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
  * <p>
  * {@code esqlType} is the type the decode paths PRODUCE — the planner/declared attribute type,
  * not necessarily the file's own — with {@code parquetType}/{@code logicalType} carrying the
- * physical side of the pair (see {@code DeclaredTypeCoercions} for which pairs are decodable).
- * {@code dateFormatter} carries the column's declared date parse pattern for the
- * string&rarr;datetime pair; {@code null} means the ISO default.
+ * physical side of the pair and {@code fileEsqlType} its ESQL rendering (the element type for
+ * LIST columns; see {@code DeclaredTypeCoercions} for which pairs coerce and how). When
+ * {@code esqlType} differs from {@code fileEsqlType} and the pair is not fused into a decode
+ * loop, the decode paths read the column {@link #fileTyped() at the file's own type} and coerce
+ * the resulting block. {@code dateFormatter} carries the column's declared date parse pattern
+ * for the string&rarr;datetime pair; {@code null} means the ISO default.
  * <p>
  * The synthetic {@code _rowPosition} column has no Parquet descriptor (it is materialised by the
  * iterator from the file's footer + per-row position bookkeeping); use {@link #rowPosition()} to
@@ -35,8 +38,25 @@ record ColumnInfo(
     int maxDefLevel,
     int maxRepLevel,
     LogicalTypeAnnotation logicalType,
-    @Nullable DateFormatter dateFormatter
+    @Nullable DateFormatter dateFormatter,
+    @Nullable DataType fileEsqlType
 ) {
+    /**
+     * Convenience constructor for columns read at the file's own type (no declared coercion):
+     * {@code fileEsqlType == esqlType}.
+     */
+    ColumnInfo(
+        ColumnDescriptor descriptor,
+        PrimitiveType.PrimitiveTypeName parquetType,
+        DataType esqlType,
+        int maxDefLevel,
+        int maxRepLevel,
+        LogicalTypeAnnotation logicalType,
+        @Nullable DateFormatter dateFormatter
+    ) {
+        this(descriptor, parquetType, esqlType, maxDefLevel, maxRepLevel, logicalType, dateFormatter, esqlType);
+    }
+
     /** Formatter-free convenience constructor for the (dominant) columns with no declared date format. */
     ColumnInfo(
         ColumnDescriptor descriptor,
@@ -47,6 +67,19 @@ record ColumnInfo(
         LogicalTypeAnnotation logicalType
     ) {
         this(descriptor, parquetType, esqlType, maxDefLevel, maxRepLevel, logicalType, null);
+    }
+
+    /**
+     * A view of this column that decodes at the file's own type ({@code esqlType == fileEsqlType}):
+     * the physical half of the coerce-after-decode split — decode paths read this view natively,
+     * then {@code DeclaredTypeCoercions.castBlock} coerces the block to the declared
+     * {@link #esqlType}. Returns {@code this} when no retype is in play.
+     */
+    ColumnInfo fileTyped() {
+        if (fileEsqlType == null || fileEsqlType == esqlType) {
+            return this;
+        }
+        return new ColumnInfo(descriptor, parquetType, fileEsqlType, maxDefLevel, maxRepLevel, logicalType, dateFormatter, fileEsqlType);
     }
 
     /** Sentinel marker for the synthetic {@code _rowPosition} column slot. */

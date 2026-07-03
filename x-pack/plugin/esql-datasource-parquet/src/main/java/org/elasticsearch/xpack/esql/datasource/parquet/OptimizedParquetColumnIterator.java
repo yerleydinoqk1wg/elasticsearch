@@ -45,6 +45,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractor;
 import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractorProducer;
 import org.elasticsearch.xpack.esql.datasources.spi.DynamicThreshold;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
+import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageObject;
 
 import java.io.IOException;
@@ -106,6 +107,8 @@ final class OptimizedParquetColumnIterator implements CloseableIterator<Page>, C
     private final BlockFactory blockFactory;
     private final String createdBy;
     private final String fileLocation;
+    /** See {@link #coercionWarnings()}. */
+    private SkipWarnings coercionWarnings;
     private final ColumnInfo[] columnInfos;
     private final PreloadedRowGroupMetadata preloadedMetadata;
     private final StorageObject storageObject;
@@ -1489,7 +1492,7 @@ final class OptimizedParquetColumnIterator implements CloseableIterator<Page>, C
                 && columnInfos[i].maxRepLevel() == 0) {
                 ColumnDescriptor desc = columnInfos[i].descriptor();
                 PageReader pr = rowGroup.getPageReader(desc);
-                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], null);
+                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], null, coercionWarnings());
             }
         }
     }
@@ -1510,7 +1513,7 @@ final class OptimizedParquetColumnIterator implements CloseableIterator<Page>, C
                 && columnInfos[i].maxRepLevel() == 0) {
                 ColumnDescriptor desc = columnInfos[i].descriptor();
                 PageReader pr = rowGroup.getPageReader(desc);
-                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], survivorRowRanges);
+                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], survivorRowRanges, coercionWarnings());
             }
         }
     }
@@ -1527,7 +1530,7 @@ final class OptimizedParquetColumnIterator implements CloseableIterator<Page>, C
             if (columnInfos[i] != null && columnInfos[i].isRowPosition() == false && columnInfos[i].maxRepLevel() == 0) {
                 ColumnDescriptor desc = columnInfos[i].descriptor();
                 PageReader pr = rowGroup.getPageReader(desc);
-                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], currentRowRanges);
+                pageColumnReaders[i] = new PageColumnReader(pr, desc, columnInfos[i], currentRowRanges, coercionWarnings());
             }
         }
         boolean hasListColumns = false;
@@ -2230,10 +2233,32 @@ final class OptimizedParquetColumnIterator implements CloseableIterator<Page>, C
             return blockFactory.newConstantNullBlock(rowsToRead);
         }
         if (info.maxRepLevel() > 0) {
-            return ParquetColumnDecoding.readListColumn(cr, info, rowsToRead, blockFactory);
+            return ParquetColumnDecoding.readListColumn(
+                cr,
+                info,
+                rowsToRead,
+                blockFactory,
+                attributes.get(colIndex).name(),
+                coercionWarnings()
+            );
         }
         ParquetColumnDecoding.skipValues(cr, rowsToRead);
         return blockFactory.newConstantNullBlock(rowsToRead);
+    }
+
+    /**
+     * Lazily-created sink for per-value declared-coercion failures (capped response Warning
+     * headers + nulled cells); shared by every column and row group of this iterator so the cap
+     * is per read, not per column chunk.
+     */
+    private SkipWarnings coercionWarnings() {
+        if (coercionWarnings == null) {
+            coercionWarnings = new SkipWarnings(
+                "Parquet file [" + fileLocation + "] has values that could not be coerced to the declared column type; "
+                    + "they are returned as null"
+            );
+        }
+        return coercionWarnings;
     }
 
     @Override

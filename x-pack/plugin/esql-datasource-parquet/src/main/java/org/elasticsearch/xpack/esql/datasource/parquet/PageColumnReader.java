@@ -28,9 +28,12 @@ import org.elasticsearch.compute.data.BytesRefVector;
 import org.elasticsearch.compute.data.IntBlock;
 import org.elasticsearch.compute.data.OrdinalBytesRefBlock;
 import org.elasticsearch.compute.data.UninitializedArrays;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.datasources.spi.DeclaredTypeCoercions;
+import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -95,6 +98,9 @@ final class PageColumnReader implements Releasable {
     private final ColumnDescriptor descriptor;
     private final ColumnInfo info;
     private final RowRanges rowRanges;
+    /** Per-value declared-coercion failure sink ({@code null} = strict); see the 5-arg constructor. */
+    @Nullable
+    private final SkipWarnings coercionWarnings;
     private final int maxDefLevel;
 
     private Dictionary dictionary;
@@ -129,10 +135,26 @@ final class PageColumnReader implements Releasable {
     private boolean columnExhausted;
 
     PageColumnReader(PageReader pageReader, ColumnDescriptor descriptor, ColumnInfo info, RowRanges rowRanges) {
+        this(pageReader, descriptor, info, rowRanges, null);
+    }
+
+    /**
+     * @param coercionWarnings sink for per-value declared-coercion failures (nulled cell +
+     *                         response Warning header), shared across the read so the warning cap
+     *                         is per read. {@code null} = strict: a coercion failure propagates.
+     */
+    PageColumnReader(
+        PageReader pageReader,
+        ColumnDescriptor descriptor,
+        ColumnInfo info,
+        RowRanges rowRanges,
+        @Nullable SkipWarnings coercionWarnings
+    ) {
         this.pageReader = pageReader;
         this.descriptor = descriptor;
         this.info = info;
         this.rowRanges = rowRanges;
+        this.coercionWarnings = coercionWarnings;
         this.maxDefLevel = descriptor.getMaxDefinitionLevel();
         this.columnExhausted = false;
         this.rowPositionInRowGroup = 0;
@@ -144,9 +166,37 @@ final class PageColumnReader implements Releasable {
 
     Block readBatch(int maxRows, BlockFactory blockFactory) {
         loadDictionaryIfNeeded();
+        // Declared-type coercion beyond the fused pairs: decode the column at the file's own type
+        // with the arms below, then coerce the block to the declared type (bulk-API leniency: an
+        // unconvertible value nulls its cell and emits a response Warning).
+        DataType declared = info.esqlType();
+        DataType fileType = info.fileEsqlType();
+        if (fileType != null
+            && declared != fileType
+            && DeclaredTypeCoercions.fusedInDecode(fileType, declared) == false
+            && DeclaredTypeCoercions.supports(fileType, declared)) {
+            Block physical = readBatchAs(fileType, maxRows, blockFactory);
+            try {
+                return DeclaredTypeCoercions.castBlock(
+                    physical,
+                    fileType,
+                    declared,
+                    info.dateFormatter(),
+                    blockFactory,
+                    String.join(".", descriptor.getPath()),
+                    coercionWarnings
+                );
+            } finally {
+                physical.close();
+            }
+        }
+        return readBatchAs(declared, maxRows, blockFactory);
+    }
+
+    private Block readBatchAs(DataType type, int maxRows, BlockFactory blockFactory) {
         // WARNING: the dispatching logic below is duplicated in ParquetFormatReader#readColumnBlock
         // KEEP IN SYNC!
-        return switch (info.esqlType()) {
+        return switch (type) {
             case BOOLEAN -> readBooleanBatch(maxRows, blockFactory);
             case INTEGER -> readIntBatch(maxRows, blockFactory);
             case LONG, UNSIGNED_LONG -> {
@@ -165,7 +215,7 @@ final class PageColumnReader implements Releasable {
                 // A 64-bit unsigned column maps to UNSIGNED_LONG, which ESQL stores sign-flip-encoded
                 // (value ^ 2^63) so signed-long ordering matches unsigned ordering. The output edge always
                 // decodes UNSIGNED_LONG blocks, so the read path must emit the encoded form here.
-                yield readLongBatch(maxRows, blockFactory, 1L, info.esqlType() == DataType.UNSIGNED_LONG);
+                yield readLongBatch(maxRows, blockFactory, 1L, type == DataType.UNSIGNED_LONG);
             }
             case DOUBLE -> readDoubleBatch(maxRows, blockFactory);
             case KEYWORD, TEXT -> readBytesBatch(maxRows, blockFactory);
