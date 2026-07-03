@@ -94,13 +94,13 @@ export BUILDKITE_API_TOKEN
 
 export GH_TOKEN="${VAULT_GITHUB_TOKEN:-}"
 
-# ── pi-agent ──────────────────────────────────────────────────────────────────
-# Bootstraps the self-contained pi-agent CLI (https://github.com/breskeby/rene-bk-experiments)
-# so the elasticsearch-agentic-workflow pipeline can run pi sessions on this agent.
+# ── archimedes ────────────────────────────────────────────────────────────────
+# Bootstraps the self-contained archimedes CLI (https://github.com/elastic/rene-bk-experiments)
+# so the elasticsearch-agentic-workflow pipeline can run agent sessions on this agent.
 #
-# Completely inert unless USE_PI_AGENT=true is set on the step. The required
+# Completely inert unless USE_ARCHIMEDES=true is set on the step. The required
 # secrets live in Vault at secret/ci/elastic-elasticsearch/agentic-workflows.
-if [[ "${USE_PI_AGENT:-}" == "true" ]]; then
+if [[ "${USE_ARCHIMEDES:-}" == "true" ]]; then
   # LiteLLM API key — the bundled models.json resolves it automatically.
   ELASTIC_LITELLM_API_KEY=$(vault_with_retry read -field=litellm_token secret/ci/elastic-elasticsearch/agentic-workflows)
   export ELASTIC_LITELLM_API_KEY
@@ -118,39 +118,39 @@ if [[ "${USE_PI_AGENT:-}" == "true" ]]; then
 
   export PATH="${HOME}/.local/bin:${PATH}"
 
-  # Bootstrap pi-agent if not already cached on this agent.
-  PI_AGENT_TAG="${PI_AGENT_TAG:-pi-agent-v1.0.26}"
-  PI_AGENT_DIR="${HOME}/.local/pi-agent"
+  # Bootstrap archimedes if not already cached on this agent.
+  ARCHIMEDES_TAG="${ARCHIMEDES_TAG:-archimedes-v0.9.0}"
+  ARCHIMEDES_DIR="${HOME}/.local/archimedes"
 
   # gh_admin_token is SAML-authorized for the elastic org — used both to
-  # download the pi-agent release from elastic/rene-bk-experiments and to
+  # download the archimedes release from elastic/rene-bk-experiments and to
   # write comments/labels on elastic/elasticsearch issues via gh.
   GH_ADMIN_TOKEN=$(vault_with_retry read -field=gh_admin_token secret/ci/elastic-elasticsearch/agentic-workflows)
 
-  if [[ ! -x "${PI_AGENT_DIR}/bin/pi-agent.js" ]]; then
-    echo "--- Bootstrapping pi-agent (${PI_AGENT_TAG})"
+  if [[ ! -x "${ARCHIMEDES_DIR}/bin/archimedes.js" ]]; then
+    echo "--- Bootstrapping archimedes (${ARCHIMEDES_TAG})"
 
-    PI_AGENT_REPO="${PI_AGENT_REPO:-elastic/rene-bk-experiments}"
+    ARCHIMEDES_REPO="${ARCHIMEDES_REPO:-elastic/rene-bk-experiments}"
 
     TMPDIR_DL="$(mktemp -d)"
 
     # Resolve the pinned release's .tgz asset API URL. Capture the HTTP status
     # so an auth/permission failure surfaces clearly instead of crashing the
     # downstream JSON parse with an opaque "Unexpected end of JSON input".
-    PI_RELEASE_API="https://api.github.com/repos/${PI_AGENT_REPO}/releases/tags/${PI_AGENT_TAG}"
-    PI_RELEASE_HTTP=$(curl -sSL -w '%{http_code}' -o "${TMPDIR_DL}/release.json" \
+    ARCHIMEDES_RELEASE_API="https://api.github.com/repos/${ARCHIMEDES_REPO}/releases/tags/${ARCHIMEDES_TAG}"
+    ARCHIMEDES_RELEASE_HTTP=$(curl -sSL -w '%{http_code}' -o "${TMPDIR_DL}/release.json" \
       -H "Authorization: Bearer ${GH_ADMIN_TOKEN}" \
-      "${PI_RELEASE_API}")
-    if [[ "${PI_RELEASE_HTTP}" != "200" ]]; then
-      echo "Failed to fetch pi-agent release ${PI_AGENT_TAG} from ${PI_AGENT_REPO}" >&2
-      echo "  GET ${PI_RELEASE_API} -> HTTP ${PI_RELEASE_HTTP}" >&2
+      "${ARCHIMEDES_RELEASE_API}")
+    if [[ "${ARCHIMEDES_RELEASE_HTTP}" != "200" ]]; then
+      echo "Failed to fetch archimedes release ${ARCHIMEDES_TAG} from ${ARCHIMEDES_REPO}" >&2
+      echo "  GET ${ARCHIMEDES_RELEASE_API} -> HTTP ${ARCHIMEDES_RELEASE_HTTP}" >&2
       echo "  Response body:" >&2
       cat "${TMPDIR_DL}/release.json" >&2 || true
       rm -rf "${TMPDIR_DL}"
       exit 1
     fi
 
-    PI_TARBALL_URL=$(node -e "
+    ARCHIMEDES_TARBALL_URL=$(node -e "
         const r = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
         const a = (r.assets || []).find(a => a.name.endsWith('.tgz') && !a.name.includes('sha256'));
         if (!a) { process.stderr.write('No .tgz asset found in release\n'); process.exit(1); }
@@ -160,34 +160,34 @@ if [[ "${USE_PI_AGENT:-}" == "true" ]]; then
     curl -fsSL \
       -H "Authorization: Bearer ${GH_ADMIN_TOKEN}" \
       -H "Accept: application/octet-stream" \
-      "${PI_TARBALL_URL}" \
-      -o "${TMPDIR_DL}/pi-agent.tgz"
+      "${ARCHIMEDES_TARBALL_URL}" \
+      -o "${TMPDIR_DL}/archimedes.tgz"
 
-    rm -rf "${PI_AGENT_DIR}"
-    mkdir -p "${PI_AGENT_DIR}"
-    tar -xzf "${TMPDIR_DL}/pi-agent.tgz" -C "${PI_AGENT_DIR}" --strip-components=1
+    rm -rf "${ARCHIMEDES_DIR}"
+    mkdir -p "${ARCHIMEDES_DIR}"
+    tar -xzf "${TMPDIR_DL}/archimedes.tgz" -C "${ARCHIMEDES_DIR}" --strip-components=1
 
     # Install the bundled pi SDK dependency.
-    npm install --prefix "${PI_AGENT_DIR}" --omit=dev --no-audit --no-fund --silent
+    npm install --prefix "${ARCHIMEDES_DIR}" --omit=dev --no-audit --no-fund --silent
 
     mkdir -p "${HOME}/.local/bin"
-    ln -sf "${PI_AGENT_DIR}/bin/pi-agent.js" "${HOME}/.local/bin/pi-agent"
-    chmod +x "${PI_AGENT_DIR}/bin/pi-agent.js"
+    ln -sf "${ARCHIMEDES_DIR}/bin/archimedes.js" "${HOME}/.local/bin/archimedes"
+    chmod +x "${ARCHIMEDES_DIR}/bin/archimedes.js"
     rm -rf "${TMPDIR_DL}"
   fi
 
-  # Override GH_TOKEN with the admin token so pi-agent can post comments and
+  # Override GH_TOKEN with the admin token so archimedes can post comments and
   # apply labels on elastic/elasticsearch issues via `gh issue comment` and
   # `gh issue edit`.
   export GH_TOKEN="${GH_ADMIN_TOKEN}"
   unset GH_ADMIN_TOKEN
 
-  # No external nono CLI bootstrap needed: pi-agent v1.0.21+ sandboxes itself
-  # in-process via the bundled nono-ts SDK (activated by PI_AGENT_SANDBOX=1 in
-  # run-pi-agent.sh). This replaces the old `nono run` supervised wrapper, which
+  # No external nono CLI bootstrap needed: archimedes sandboxes itself
+  # in-process via the bundled nono-ts SDK (activated by ARCHIMEDES_SANDBOX=1 in
+  # run-archimedes.sh). This replaces the old `nono run` supervised wrapper, which
   # failed under Landlock with exit 127 when re-resolving the script interpreter.
 fi
-# ── end pi-agent ──────────────────────────────────────────────────────────────
+# ── end archimedes ────────────────────────────────────────────────────────────
 
 if [[ "${USE_LUCENE_SNAPSHOT_CREDS:-}" == "true" ]]; then
   data=$(.buildkite/scripts/get-legacy-secret.sh aws-elastic/creds/lucene-snapshots)

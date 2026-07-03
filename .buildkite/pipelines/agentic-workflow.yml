@@ -3,10 +3,10 @@
 #
 # elasticsearch-agentic-workflow
 #
-# On-demand agentic CI workflows powered by the self-contained pi-agent CLI
-# (https://github.com/elastic/rene-bk-experiments). pi runs directly on the
-# agent — no remote pipeline trigger and no .pi/ config in this repo. The
-# pre-command hook bootstraps pi-agent and injects secrets when USE_PI_AGENT=true.
+# On-demand agentic CI workflows powered by the self-contained archimedes CLI
+# (https://github.com/elastic/rene-bk-experiments). archimedes runs directly on
+# the agent — no remote pipeline trigger and no agent config in this repo. The
+# pre-command hook bootstraps archimedes and injects secrets when USE_ARCHIMEDES=true.
 #
 # Supported workflows:
 #   test-analysis          — analyse a test-failure issue        (needs ISSUE_URL)
@@ -32,17 +32,17 @@ env:
   PR_URL:    "${PR_URL:-}"
 
 steps:
-  # ── Run pi-agent ─────────────────────────────────────────────────────────────
-  - label: ":robot_face: Pi — :workflow:"
-    key: pi-run
+  # ── Run archimedes ───────────────────────────────────────────────────────────
+  - label: ":robot_face: Archimedes — :workflow:"
+    key: archimedes-run
     timeout_in_minutes: 60
     env:
-      USE_PI_AGENT: "true"
-      PI_AGENT_SESSION_DIR: "/tmp/pi-agent-sessions"
+      USE_ARCHIMEDES: "true"
+      ARCHIMEDES_SESSION_DIR: "/tmp/archimedes-sessions"
     agents:
       provider:       gcp
       image:          family/elasticsearch-ubuntu-2404
-      # The pi-run agent is an I/O-bound orchestrator (LLM/gh/git calls); it does
+      # The archimedes-run agent is an I/O-bound orchestrator (LLM/gh/git calls); it does
       # NOT build Elasticsearch — reproduction runs on its own n4-standard-64 job.
       # 4 vCPU is plenty; the full-history mirror checkout is the only heavy step.
       machineType:    n4-standard-4
@@ -52,4 +52,4 @@ steps:
       automatic:
         - exit_status: "*"
           limit: 1
-    command: bash .buildkite/scripts/run-pi-agent.sh
+    command: bash .buildkite/scripts/run-archimedes.sh

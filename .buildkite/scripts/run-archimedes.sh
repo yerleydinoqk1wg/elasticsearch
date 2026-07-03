@@ -1,9 +1,9 @@
 #!/bin/bash
-# Runs a pi-agent workflow session.
+# Runs an archimedes workflow session.
 # Called by .buildkite/pipelines/agentic-workflow.yml.
 #
 # All variables (WORKFLOW, ISSUE_URL, PR_URL, BUILDKITE_RETRY_COUNT,
-# PI_AGENT_SESSION_DIR) are set as shell environment variables before this
+# ARCHIMEDES_SESSION_DIR) are set as shell environment variables before this
 # script runs — no Buildkite YAML interpolation headaches here.
 
 set -euo pipefail
@@ -30,14 +30,14 @@ case "${WORKFLOW:-}" in
 esac
 
 # ── Session persistence (spot-instance preemption recovery) ───────────────────
-SESSION_DIR="${PI_AGENT_SESSION_DIR:-/tmp/pi-agent-sessions}"
+SESSION_DIR="${ARCHIMEDES_SESSION_DIR:-/tmp/archimedes-sessions}"
 mkdir -p "$SESSION_DIR"
 
 _upload_session() {
   local latest
   latest=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1) || true
   if [[ -n "$latest" ]]; then
-    local dest="$SESSION_DIR/pi-agent-session.jsonl"
+    local dest="$SESSION_DIR/archimedes-session.jsonl"
     # The newest .jsonl may already be the canonical artifact name (e.g. on a
     # resumed retry). Only copy when they differ to avoid a cp self-copy error.
     [[ "$latest" -ef "$dest" ]] || cp "$latest" "$dest"
@@ -50,59 +50,59 @@ trap 'echo "SIGTERM received — uploading session before exit"; _upload_session
 
 if [[ "${BUILDKITE_RETRY_COUNT:-0}" -gt 0 ]]; then
   echo "--- Retry #${BUILDKITE_RETRY_COUNT} — downloading previous session"
-  buildkite-agent artifact download "pi-agent-session.jsonl" "$SESSION_DIR/" 2>/dev/null \
-    && echo "Session downloaded ($(wc -c < "$SESSION_DIR/pi-agent-session.jsonl") bytes) — will resume" \
+  buildkite-agent artifact download "archimedes-session.jsonl" "$SESSION_DIR/" 2>/dev/null \
+    && echo "Session downloaded ($(wc -c < "$SESSION_DIR/archimedes-session.jsonl") bytes) — will resume" \
     || echo "No previous session artifact found — starting fresh"
 fi
 
 # ── Opening annotation ─────────────────────────────────────────────────────────
 REF="${ISSUE_URL:-${PR_URL:-}}"
 buildkite-agent annotate \
-  "### 🤖 pi-agent starting
+  "### 🤖 archimedes starting
 
 **Workflow:** \`${WORKFLOW}\`
 **Ref:** ${REF}
 Session is initialising…" \
-  --context "pi-agent-progress" --style "info"
+  --context "archimedes-progress" --style "info"
 
-# ── Run pi-agent (in-process nono sandbox) ─────────────────────────────────────
-# pi-agent sandboxes ITSELF via the bundled nono-ts SDK when PI_AGENT_SANDBOX=1
+# ── Run archimedes (in-process nono sandbox) ─────────────────────────────────────
+# archimedes sandboxes ITSELF via the bundled nono-ts SDK when ARCHIMEDES_SANDBOX=1
 # (Landlock on Linux). Applying the sandbox in-process — after node has started
 # and its libraries are mapped — avoids the `nono run` CLI's supervised re-exec,
-# which re-resolved pi-agent's `#!/usr/bin/env node` interpreter under the
+# which re-resolved archimedes's `#!/usr/bin/env node` interpreter under the
 # sandbox and died with exit 127 before any agent code ran. The filesystem
 # allowlist, Vault-handle scrubbing, and fail-closed behaviour live in the
-# pi-agent distro (packages/pi-agent/src/sandbox.js + nono-pi-agent.json).
+# archimedes distro (packages/archimedes/src/sandbox.js + nono-archimedes.json).
 # Network is left open in-process; host-level egress control, if ever required,
 # belongs at the VM/firewall layer.
-export PI_AGENT_SANDBOX=1
+export ARCHIMEDES_SANDBOX=1
 
-PI_EXIT=0
+ARCHIMEDES_EXIT=0
 case "${WORKFLOW}" in
   test-analysis)
-    pi-agent analyze --issue-url "${ISSUE_URL}" || PI_EXIT=$? ;;
+    archimedes analyze --issue-url "${ISSUE_URL}" || ARCHIMEDES_EXIT=$? ;;
   pull-request-fix)
-    pi-agent fix-pr  --pr-url    "${PR_URL}"    || PI_EXIT=$? ;;
+    archimedes fix-pr  --pr-url    "${PR_URL}"    || ARCHIMEDES_EXIT=$? ;;
   pull-request-creation)
-    pi-agent create  --issue-url "${ISSUE_URL}" || PI_EXIT=$? ;;
+    archimedes create  --issue-url "${ISSUE_URL}" || ARCHIMEDES_EXIT=$? ;;
 esac
 
 # ── Final annotation ───────────────────────────────────────────────────────────
-if [[ $PI_EXIT -eq 0 ]]; then
+if [[ $ARCHIMEDES_EXIT -eq 0 ]]; then
   buildkite-agent annotate \
-    "### ✅ pi-agent completed
+    "### ✅ archimedes completed
 
 **Workflow:** \`${WORKFLOW}\`
 **Ref:** ${REF}" \
-    --context "pi-agent-progress" --style "success"
+    --context "archimedes-progress" --style "success"
 else
   buildkite-agent annotate \
-    "### ❌ pi-agent failed (exit ${PI_EXIT})
+    "### ❌ archimedes failed (exit ${ARCHIMEDES_EXIT})
 
 **Workflow:** \`${WORKFLOW}\`
 **Ref:** ${REF}
 See the job log for details." \
-    --context "pi-agent-progress" --style "error"
+    --context "archimedes-progress" --style "error"
 fi
 
-exit $PI_EXIT
+exit $ARCHIMEDES_EXIT
