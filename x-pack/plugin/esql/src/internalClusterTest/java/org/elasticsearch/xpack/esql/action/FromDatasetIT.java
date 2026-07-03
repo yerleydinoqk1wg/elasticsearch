@@ -1540,6 +1540,99 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         assertThat(csvFailure.getMessage(), containsString("definitely-not-a-date"));
     }
 
+    public void testNdjsonBadDateTokenHonorsErrorPolicyMatchingColumnar() throws Exception {
+        // NDJSON's declared-datetime parse failure must obey the SAME ErrorPolicy contract as the columnar and CSV
+        // readers: under fail_fast it fails the query (like parquet/CSV); under a non-strict policy (null_field) it
+        // nulls THAT cell + emits a response Warning while the query succeeds. Before the fix the NDJSON path
+        // null-filled policy-blind — fail_fast silently succeeded and no Warning header was emitted. Both policies are
+        // set explicitly here: NDJSON's DEFAULT error_mode is fail_fast (text formats parse strictly by default),
+        // unlike parquet/orc which default to null_field, so the policy is pinned rather than left to the default.
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        String content = """
+            {"ts":"10/Oct/2000:13:55:36 -0700","note":"alpha"}
+            {"ts":"definitely-not-a-date","note":"beta"}
+            """;
+        java.util.Map<String, DatasetFieldMapping> props = new java.util.LinkedHashMap<>();
+        props.put("ts", new DatasetFieldMapping("date", null, List.of(), ACCESS_LOG_FORMAT));
+        props.put("note", new DatasetFieldMapping("keyword", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.TRUE, props));
+
+        // fail_fast -> query aborts on the bad token, matching parquet/CSV.
+        Path failFast = createTempFile("dataset-bad-date-ndjson-ff-", ".ndjson");
+        Files.writeString(failFast, content);
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_ndjson_bad_date_failfast",
+                    "local_ds",
+                    failFast.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "ndjson", "error_mode", "fail_fast")),
+                    mapping
+                )
+            )
+        );
+        Exception ndjsonFailure = expectThrows(
+            Exception.class,
+            () -> run(syncEsqlQueryRequest("FROM logs_ndjson_bad_date_failfast | KEEP ts, note | LIMIT 10"), TIMEOUT).close()
+        );
+        assertThat(ndjsonFailure.getMessage(), containsString("definitely-not-a-date"));
+
+        // null_field policy -> the bad cell nulls, the query succeeds.
+        Path permissive = createTempFile("dataset-bad-date-ndjson-perm-", ".ndjson");
+        Files.writeString(permissive, content);
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "logs_ndjson_bad_date_permissive",
+                    "local_ds",
+                    permissive.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "ndjson", "error_mode", "null_field")),
+                    mapping
+                )
+            )
+        );
+        try (
+            var response = run(syncEsqlQueryRequest("FROM logs_ndjson_bad_date_permissive | SORT note | KEEP ts, note | LIMIT 10"), TIMEOUT)
+        ) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows, hasSize(2));
+            assertThat(rows.get(0).get(0), equalTo("2000-10-10T20:55:36.000Z")); // alpha, good token
+            assertThat("the bad token reads as null, not a thrown read", rows.get(1).get(0), equalTo(null)); // beta, bad token
+        }
+
+        // The nulled cell must be announced as a response Warning header, same probe as the columnar test.
+        List<String> coercionWarnings = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        client().execute(
+            EsqlQueryAction.INSTANCE,
+            syncEsqlQueryRequest("FROM logs_ndjson_bad_date_permissive | SORT note | KEEP ts | LIMIT 10"),
+            ActionListener.running(() -> {
+                try {
+                    internalCluster().getInstance(TransportService.class)
+                        .getThreadPool()
+                        .getThreadContext()
+                        .getResponseHeaders()
+                        .getOrDefault("Warning", List.of())
+                        .stream()
+                        .filter(w -> w.contains("could not be parsed to the declared type"))
+                        .forEach(coercionWarnings::add);
+                } finally {
+                    latch.countDown();
+                }
+            })
+        );
+        assertTrue("query did not complete within timeout", latch.await(30, java.util.concurrent.TimeUnit.SECONDS));
+        assertThat("the nulled NDJSON cell must emit a response Warning header", coercionWarnings, not(empty()));
+    }
+
     public void testStringToDatetimeEquivalentAcrossTextAndColumnar() throws Exception {
         // DIRECT text<->columnar consistency: the SAME date string + declared format, read as a CSV token (text parse)
         // and as a Parquet BINARY value (columnar string->date coerce), produces the IDENTICAL instant — because both

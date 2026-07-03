@@ -1405,18 +1405,27 @@ public class NdJsonPageDecoder implements Closeable {
                     }
                 }
                 case DATETIME -> {
+                    String raw = parser.getValueAsString();
                     try {
                         // A column with a declared `format` parses through the shared DeclaredTypeCoercions
                         // .parseDatetimeMillis — the SAME string->datetime conversion the columnar readers use for
                         // string->date coercion, so identical bytes + declared format yield the same instant across
-                        // formats. No declared format keeps the file-level datetimeFormatter path unchanged. Malformed
-                        // values follow the existing unexpectedValue (append-null + debug-log) channel unchanged.
+                        // formats. No declared format keeps the file-level datetimeFormatter path unchanged.
                         var millis = declaredFormatter != null
-                            ? DeclaredTypeCoercions.parseDatetimeMillis(parser.getValueAsString(), declaredFormatter)
-                            : datetimeFormatter.parseMillis(parser.getValueAsString());
+                            ? DeclaredTypeCoercions.parseDatetimeMillis(raw, declaredFormatter)
+                            : datetimeFormatter.parseMillis(raw);
                         ((LongBlock.Builder) blockBuilder).appendLong(millis);
                     } catch (Exception e) {
-                        unexpectedValue(blockBuilder, parser, inArray);
+                        if (declaredFormatter != null) {
+                            // A declared-format parse failure is a declared-coercion failure: honor the ErrorPolicy the
+                            // columnar and CSV readers honor (fail_fast fails the query; other modes null the cell and
+                            // emit a response Warning), so the same bad token yields the same observable outcome across
+                            // every format. The file-level datetime path (no declared format) keeps its pre-existing
+                            // unexpectedValue (append-null + debug-log) channel.
+                            coercionFailure(blockBuilder, parser, inArray, raw);
+                        } else {
+                            unexpectedValue(blockBuilder, parser, inArray);
+                        }
                     }
                 }
                 case KEYWORD -> {
@@ -1437,6 +1446,38 @@ public class NdJsonPageDecoder implements Closeable {
             logger.debug("Unexpected token type: {} for attribute: {} at {}", parser.currentToken(), name, parser.getTokenLocation());
             // Ignore any children to keep reading other values
             parser.skipChildren();
+        }
+
+        /**
+         * Handles a value that cannot be coerced into a column's DECLARED type (today: a string that the declared
+         * date {@code format} cannot parse). Routed through {@link ErrorPolicy} exactly like {@link #shapeConflict}
+         * and {@link DeclaredTypeCoercions#onCoercionFailure} so a declared-coercion failure produces the SAME
+         * observable outcome across every format: {@link ErrorPolicy.Mode#FAIL_FAST} fails the query with an
+         * actionable message; other modes null this cell only and surface the message as a client warning (subject to
+         * the error budget). This is distinct from {@link #unexpectedValue}, the policy-blind channel the file-level
+         * (undeclared) datetime path and other per-field type mismatches keep.
+         */
+        private void coercionFailure(Block.Builder builder, JsonParser parser, boolean inArray, String value) throws IOException {
+            String message = "column ["
+                + name
+                + "] at line ["
+                + totalRowCount
+                + "]: value ["
+                + value
+                + "] could not be parsed to the declared type [datetime] with the declared format — this record's ["
+                + name
+                + "] is null";
+            parser.skipChildren();
+            if (errorPolicy.isStrict()) {
+                throw new EsqlIllegalArgumentException(message);
+            }
+            if (inArray == false) {
+                builder.appendNull();
+            }
+            errorCount++;
+            skipWarnings.add(message);
+            checkErrorBudgetOrThrow();
+            logger.log(errorPolicy.logErrors() ? Level.INFO : Level.DEBUG, message);
         }
 
         /**
