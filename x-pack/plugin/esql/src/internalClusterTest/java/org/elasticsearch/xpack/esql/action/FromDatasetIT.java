@@ -236,7 +236,14 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "employees_strict_uncoercible",
         "employees_strict_coerce_multi",
         "employees_int_to_long",
-        "logs_parquet_string_date"
+        "logs_parquet_string_date",
+        "coerced_long_to_double",
+        "logs_csv_equiv",
+        "logs_parquet_equiv",
+        "long_csv_equiv",
+        "long_parquet_equiv",
+        "typed_strings_parquet",
+        "logs_deferred_coerce"
     );
 
     /**
