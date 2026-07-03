@@ -39,6 +39,7 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.util.Check;
 import org.elasticsearch.xpack.esql.datasources.SyntheticColumns;
 import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractor;
+import org.elasticsearch.xpack.esql.datasources.spi.DeclaredTypeCoercions;
 import org.elasticsearch.xpack.esql.datasources.spi.ErrorPolicy;
 import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 
@@ -1405,11 +1406,14 @@ public class NdJsonPageDecoder implements Closeable {
                 }
                 case DATETIME -> {
                     try {
-                        // A column with a declared `format` parses with its own ES DateFormatter (zone-aware, same as
-                        // the file-level one); otherwise the file-level datetimeFormatter. Malformed values follow the
-                        // existing unexpectedValue (append-null + debug-log) channel unchanged.
-                        DateFormatter formatter = declaredFormatter != null ? declaredFormatter : datetimeFormatter;
-                        var millis = formatter.parseMillis(parser.getValueAsString());
+                        // A column with a declared `format` parses through the shared DeclaredTypeCoercions
+                        // .parseDatetimeMillis — the SAME string->datetime conversion the columnar readers use for
+                        // string->date coercion, so identical bytes + declared format yield the same instant across
+                        // formats. No declared format keeps the file-level datetimeFormatter path unchanged. Malformed
+                        // values follow the existing unexpectedValue (append-null + debug-log) channel unchanged.
+                        var millis = declaredFormatter != null
+                            ? DeclaredTypeCoercions.parseDatetimeMillis(parser.getValueAsString(), declaredFormatter)
+                            : datetimeFormatter.parseMillis(parser.getValueAsString());
                         ((LongBlock.Builder) blockBuilder).appendLong(millis);
                     } catch (Exception e) {
                         unexpectedValue(blockBuilder, parser, inArray);

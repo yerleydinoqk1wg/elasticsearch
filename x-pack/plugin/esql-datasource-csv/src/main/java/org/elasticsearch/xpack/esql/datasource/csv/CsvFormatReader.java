@@ -52,6 +52,7 @@ import org.elasticsearch.xpack.esql.datasources.cache.TextFormatStats;
 import org.elasticsearch.xpack.esql.datasources.spi.AggregatePushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.BufferingPageIterator;
 import org.elasticsearch.xpack.esql.datasources.spi.Configured;
+import org.elasticsearch.xpack.esql.datasources.spi.DeclaredTypeCoercions;
 import org.elasticsearch.xpack.esql.datasources.spi.ErrorPolicy;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReadContext;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -3173,12 +3174,15 @@ public class CsvFormatReader implements SegmentableFormatReader {
 
         private Object tryParseDatetime(String value, int columnIndex) {
             // A column with a declared `format` parses strictly with that ES DateFormatter, overriding the numeric
-            // epoch shortcut, the file-level datetime_format, and the ISO fast path — for THIS column only. parseMillis
-            // is zone-aware (defaults a missing zone to UTC), unlike the LocalDateTime.parse path below which discards
-            // any parsed offset. Other columns keep exactly today's behavior.
+            // epoch shortcut, the file-level datetime_format, and the ISO fast path — for THIS column only. The parse
+            // goes through the shared DeclaredTypeCoercions.parseDatetimeMillis, the SAME string->datetime conversion
+            // the columnar readers use for their string->date coercion, so identical bytes + declared format produce
+            // the identical instant regardless of source format. It is zone-aware (defaults a missing zone to UTC),
+            // unlike the LocalDateTime.parse path below which discards any parsed offset. Other columns keep today's
+            // behavior.
             if (declaredFormatters != null && declaredFormatters[columnIndex] != null) {
                 try {
-                    return declaredFormatters[columnIndex].parseMillis(value);
+                    return DeclaredTypeCoercions.parseDatetimeMillis(value, declaredFormatters[columnIndex]);
                 } catch (Exception e) {
                     lastFieldError = "Failed to parse CSV datetime value [" + value + "]";
                     return null;
