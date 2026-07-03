@@ -99,9 +99,11 @@ public interface FormatReader extends Closeable {
     }
 
     /**
-     * Returns the default error policy for this format.
-     * Override to change the default behavior for a specific format (e.g. NDJSON
-     * defaults to lenient because skipping malformed lines is its natural behavior).
+     * Returns the default error policy for this format. The base default is {@link ErrorPolicy#STRICT}
+     * (fail_fast) and every format inherits it, so a bad per-value coercion fails the read across all
+     * formats unless the user opts into {@code error_mode: null_field}. Pinned per reader by a
+     * {@code testDefaultErrorPolicyIsStrict} guard; do not override to a lenient default (that would
+     * silently diverge one format from the others).
      */
     default ErrorPolicy defaultErrorPolicy() {
         return ErrorPolicy.STRICT;

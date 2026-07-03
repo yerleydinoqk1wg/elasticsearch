@@ -719,8 +719,9 @@ final class ParquetColumnExtractor implements ColumnExtractor {
 
     /**
      * List-column sparse decode. parquet-mr's {@link ColumnReader} is repetition-aware so we
-     * walk the row-group rows in source order via {@link ParquetColumnDecoding#skipListValues}
-     * and {@link ParquetColumnDecoding#readListColumn}, alternating skip/read runs in lock-step
+     * walk the row-group rows in source order via {@link #skipListRows} (a sparse row-granular
+     * skip — {@code ParquetColumnDecoding#skipListValues} skips values, not rows, and would leave
+     * the data cursor stale here) and {@link ParquetColumnDecoding#readListColumn}, alternating skip/read runs in lock-step
      * with the unique survivor positions. Same in-memory chunks as the flat path; we only swap
      * the decoder.
      */
