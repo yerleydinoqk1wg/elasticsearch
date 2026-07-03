@@ -232,8 +232,9 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         "logs_id_partition",
         "logs_partition_collide_nonstrict",
         "logs_partition_collide_path",
-        "employees_strict_mismatch",
-        "employees_strict_mismatch_multi"
+        "employees_strict_coerce",
+        "employees_strict_uncoercible",
+        "employees_strict_coerce_multi"
     );
 
     /**
@@ -1236,14 +1237,14 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         assertThat(e.getMessage(), containsString("collides with an existing column"));
     }
 
-    public void testStrictColumnarTypeMismatchRejected() throws Exception {
-        // Strict + columnar: declaring the physical int64 `emp_no` as DATETIME is a type mismatch. Both are LongBlock-
-        // backed, so the columnar reader neither errors nor reinterprets — it yields silent nulls. Validate the declared
-        // types against the file's physical schema at resolution and reject with an actionable message instead.
+    public void testStrictColumnarLongToDatetimeCoerces() throws Exception {
+        // Strict + columnar: declaring the physical int64 `emp_no` as DATETIME COERCES at read time (Hive/Trino style) —
+        // the reader reinterprets the epoch-millis long as a datetime, no reject and no silent null. emp_no 1,2,3 read
+        // as the datetimes at epoch millis 1,2,3 (1970-01-01T00:00:00.001/.002/.003Z).
         assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
         Path parquet = writeParquetRenameFixture();
         java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
-        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical is int64 (long)
+        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical int64 -> coerce to datetime
         DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
         assertAcked(
             client().execute(
@@ -1251,7 +1252,39 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 new PutDatasetAction.Request(
                     TIMEOUT,
                     TIMEOUT,
-                    "employees_strict_mismatch",
+                    "employees_strict_coerce",
+                    "local_ds",
+                    parquet.toUri().toString(),
+                    null,
+                    new HashMap<>(Map.of("format", "parquet")),
+                    mapping
+                )
+            )
+        );
+        try (var response = run(syncEsqlQueryRequest("FROM employees_strict_coerce | SORT id | KEEP id | LIMIT 10"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows, hasSize(3));
+            assertThat(rows.get(0).get(0), equalTo("1970-01-01T00:00:00.001Z"));
+            assertThat(rows.get(1).get(0), equalTo("1970-01-01T00:00:00.002Z"));
+            assertThat(rows.get(2).get(0), equalTo("1970-01-01T00:00:00.003Z"));
+        }
+    }
+
+    public void testStrictColumnarUncoercibleTypeRejected() throws Exception {
+        // The no-silent-null guarantee holds: a declared type with NO read-time conversion from the physical type
+        // (int64 -> double is lossy, excluded from the coercion matrix) is rejected at resolution, not silently nulled.
+        assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
+        Path parquet = writeParquetRenameFixture();
+        java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
+        properties.put("id", new DatasetFieldMapping("double", "emp_no")); // physical int64 -> double: no coercion
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
+        assertAcked(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(
+                    TIMEOUT,
+                    TIMEOUT,
+                    "employees_strict_uncoercible",
                     "local_ds",
                     parquet.toUri().toString(),
                     null,
@@ -1262,21 +1295,22 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
         );
         Exception e = expectThrows(
             Exception.class,
-            () -> run(syncEsqlQueryRequest("FROM employees_strict_mismatch | KEEP id | LIMIT 10"), TIMEOUT).close()
+            () -> run(syncEsqlQueryRequest("FROM employees_strict_uncoercible | KEEP id | LIMIT 10"), TIMEOUT).close()
         );
-        assertThat(e.getMessage(), containsString("does not match the file's type"));
+        assertThat(e.getMessage(), containsString("no read-time conversion exists for this pair"));
         assertThat(e.getMessage(), containsString("id"));
     }
 
-    public void testStrictColumnarTypeMismatchMultiFileRejected() throws Exception {
-        // Same mismatch as above, but over a MULTI-FILE glob: the multi-file strict path reads ONE anchor file's footer
-        // (listing.path(0) / listing.lastModifiedMillis(0)) to validate — distinct plumbing from the single-file path.
+    public void testStrictColumnarLongToDatetimeCoercesMultiFile() throws Exception {
+        // Same coercion as above, but over a MULTI-FILE glob: the multi-file strict path reads ONE anchor file's footer
+        // to validate the pair, then every file's reader coerces int64 -> datetime. Two identical files => emp_no
+        // 1,2,3 twice, all coerced.
         assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
         Path dir = createTempDir();
         Files.write(dir.resolve("part1.parquet"), parquetRenameFixtureBytes());
         Files.write(dir.resolve("part2.parquet"), parquetRenameFixtureBytes());
         java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
-        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical is int64 (long)
+        properties.put("id", new DatasetFieldMapping("datetime", "emp_no")); // physical int64 -> coerce to datetime
         DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, properties));
         assertAcked(
             client().execute(
@@ -1284,7 +1318,7 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 new PutDatasetAction.Request(
                     TIMEOUT,
                     TIMEOUT,
-                    "employees_strict_mismatch_multi",
+                    "employees_strict_coerce_multi",
                     "local_ds",
                     dir.toUri() + "*.parquet",
                     null,
@@ -1293,12 +1327,12 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
                 )
             )
         );
-        Exception e = expectThrows(
-            Exception.class,
-            () -> run(syncEsqlQueryRequest("FROM employees_strict_mismatch_multi | KEEP id | LIMIT 10"), TIMEOUT).close()
-        );
-        assertThat(e.getMessage(), containsString("does not match the file's type"));
-        assertThat(e.getMessage(), containsString("id"));
+        try (var response = run(syncEsqlQueryRequest("FROM employees_strict_coerce_multi | SORT id | KEEP id | LIMIT 20"), TIMEOUT)) {
+            List<List<Object>> rows = getValuesList(response);
+            assertThat(rows, hasSize(6));
+            assertThat(rows.get(0).get(0), equalTo("1970-01-01T00:00:00.001Z"));
+            assertThat(rows.get(5).get(0), equalTo("1970-01-01T00:00:00.003Z"));
+        }
     }
 
     public void testParquetStrictCopyToAndFilterPushdown() throws Exception {
@@ -1405,9 +1439,9 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
     }
 
     public void testDeclaredTypeConflictingWithPhysicalParquetTypeRejected() throws Exception {
-        // Parquet columns carry their own type — a declared retype can't change what the reader emits, so a declared
-        // type that differs from the file's is rejected at resolution with an actionable message (previously it died
-        // deep in the engine with an internal block-type mismatch). Casting a columnar column is a later increment.
+        // Parquet columns carry their own type. A declared type with a defined read-time coercion (e.g. long->datetime)
+        // is coerced; one with NO coercion (long->keyword here) is rejected at resolution with an actionable message
+        // rather than dying deep in the engine or reading as silent null.
         Path parquet = writeParquetRenameFixture();
         assertAcked(client().execute(PutDataSourceAction.INSTANCE, putDataSourceRequest("local_ds", Map.of())));
         java.util.Map<String, DatasetFieldMapping> properties = new java.util.LinkedHashMap<>();
@@ -1433,7 +1467,7 @@ public class FromDatasetIT extends AbstractEsqlIntegTestCase {
             Exception.class,
             () -> run(syncEsqlQueryRequest("FROM employees_parquet_type_conflict | SORT first_name | LIMIT 5"), TIMEOUT).close()
         );
-        assertThat(e.getMessage(), containsString("does not match the file's type"));
+        assertThat(e.getMessage(), containsString("no read-time conversion exists for this pair"));
         assertThat(e.getMessage(), containsString("emp_no"));
         assertThat(e.getMessage(), containsString("long"));
     }
