@@ -7,62 +7,88 @@
 
 package org.elasticsearch.xpack.esql.datasources.spi;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.time.DateFormatter;
+import org.elasticsearch.compute.data.Block;
+import org.elasticsearch.compute.data.BlockFactory;
+import org.elasticsearch.compute.data.BooleanBlock;
+import org.elasticsearch.compute.data.BytesRefBlock;
+import org.elasticsearch.compute.data.DoubleBlock;
+import org.elasticsearch.compute.data.IntBlock;
+import org.elasticsearch.compute.data.LongBlock;
+import org.elasticsearch.core.Booleans;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.core.util.NumericUtils;
+import org.elasticsearch.xpack.esql.core.util.StringUtils;
 import org.elasticsearch.xpack.esql.type.EsqlDataTypeConverter;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.DateTimeException;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * The single source of truth for declared-type coercion on external datasets: which
- * (physical file type &rarr; declared type) pairs an external reader coerces at read time, and the
- * one scalar conversion the fallible pair (string &rarr; date) uses everywhere.
+ * (physical file type &rarr; declared type) pairs an external reader coerces at read time, how a
+ * decoded physical block becomes a declared-type block ({@link #castBlock}), and the one scalar
+ * conversion the string &rarr; date pair uses everywhere ({@link #parseDatetimeMillis}).
  *
- * <h2>The one concept</h2>
+ * <h2>The one concept: reading a file IS ingesting it</h2>
  * A dataset mapping may declare a column type that differs from the type physically in the file
- * (Hive/Trino-style: the declaration is the table schema, readers coerce toward it). A
- * {@code (physicalType, declaredType)} pair is either castable or it is not — {@link #supports}
- * is that predicate. If castable, the reader coerces <b>as it reads</b>; if not, resolution
- * rejects the declaration with an actionable error. There is deliberately no third state: a
- * declared type that cannot be produced from the physical column must never silently read as
- * {@code null}.
+ * (Hive/Trino-style: the declaration is the table schema, readers coerce toward it). Reading a
+ * file value against a declared column is the same operation as indexing a document field
+ * against a mapping, so the coercion authority is the field mappers' lenient index-time
+ * coercion — the bulk-API behavior ({@code "123"} &rarr; {@code long},
+ * {@code long} &rarr; {@code double}, {@code string} &rarr; {@code datetime} via the column's
+ * declared {@code format}, &hellip;), not ES|QL's query-cast rules. Once a value has been
+ * coerced into the declared shape it is an ordinary ES|QL value and query-layer conversions
+ * ({@code ::}, {@code TO_*}) apply downstream as usual.
  *
- * <h2>Where the check runs — same predicate, different timing</h2>
+ * <h2>What is coercible — the mapper coercion set</h2>
+ * {@link #supports} mirrors what the field mappers accept at ingest:
+ * <ul>
+ *   <li><b>numeric targets</b> ({@code integer}/{@code long}/{@code double}/
+ *       {@code unsigned_long}): any numeric or string source, with the exact
+ *       {@link NumberFieldMapper.NumberType#parse(Object, boolean) NumberType.parse} semantics
+ *       ({@code coerce=true}, the {@code index.mapping.coerce} default: numeric strings parse,
+ *       decimals truncate toward zero on whole-number targets, out-of-range throws);</li>
+ *   <li><b>string targets</b> ({@code keyword}/{@code text}): any scalar source — ingest
+ *       stringifies the token (temporal sources render in the ISO form the default date format
+ *       parses back);</li>
+ *   <li><b>{@code boolean}</b>: string sources only ({@code "true"}/{@code "false"}, the strict
+ *       boolean-mapper token set — numbers do not ingest into a boolean field);</li>
+ *   <li><b>{@code datetime}</b>: string sources parse via {@link #parseDatetimeMillis} with the
+ *       column's declared {@code format} (else the ISO default), whole-number sources
+ *       reinterpret as epoch milliseconds (the {@code epoch_millis} half of the default date
+ *       format);</li>
+ *   <li><b>{@code ip}</b>: string sources only, parsed and encoded exactly like the ip mapper's
+ *       doc values.</li>
+ * </ul>
+ * {@code NULL}/{@code UNSUPPORTED} physical columns support nothing (the readers cannot decode a
+ * value to coerce). An unsupported pair is rejected at resolution with an actionable error;
+ * there is no third state — a declared type that cannot be produced from the physical column
+ * must never silently read as {@code null}.
+ *
+ * <h2>Where the conversion runs — same predicate, different timing</h2>
  * <ul>
  *   <li><b>Columnar formats</b> (Parquet, ORC) know the physical type upfront from the file
  *       footer, so {@code ExternalSourceResolver} runs {@link #supports} once at resolution and
- *       fails fast; the readers then coerce natively-decoded values in their decode loops (and
- *       re-check per file against this same predicate, since a multi-file glob can drift from the
- *       anchor footer).</li>
+ *       fails fast. The readers fuse a handful of pairs directly into their decode loops
+ *       ({@link #fusedInDecode}); every other supported pair decodes the column at the file's
+ *       own type and coerces it with {@link #castBlock} — per-value failures (numeric overflow,
+ *       an unparseable token) null the cell and emit a response {@code Warning} header, bulk-API
+ *       style, instead of failing the read or decoding garbage. Readers also re-check
+ *       {@link #supports} per file, since a multi-file glob can drift from the anchor footer.</li>
  *   <li><b>Text formats</b> (CSV/TSV, NDJSON) have no physical schema — every value is a string,
- *       so the parse into the declared type <i>is</i> the coercion and a bad token fails per
- *       value. Their declared date {@code format} parse goes through the same
- *       {@link #parseDatetimeMillis} scalar as the columnar string&rarr;date coercion, so the
- *       same token with the same declared format produces the same instant regardless of which
- *       format carried it.</li>
+ *       so the parse into the declared type <i>is</i> the coercion and a bad token follows the
+ *       reader's own per-value error policy. Their declared date {@code format} parse goes
+ *       through the same {@link #parseDatetimeMillis} scalar as the columnar
+ *       string&rarr;date coercion, so the same token with the same declared format produces the
+ *       same instant regardless of which format carried it.</li>
  * </ul>
- *
- * <h2>The supported matrix</h2>
- * Every entry below is implemented natively by BOTH columnar readers' decode paths; adding a row
- * here without teaching a reader to decode it re-opens the silent-null trap, so the matrix is
- * pinned by {@code DeclaredTypeCoercionsTests} and by the reader ITs.
- * <table border="1">
- *   <caption>physical &rarr; declared coercions</caption>
- *   <tr><th>physical (file)</th><th>declared</th><th>semantics</th></tr>
- *   <tr><td>{@code integer}</td><td>{@code long}</td><td>lossless widen (int32 &sube; int64)</td></tr>
- *   <tr><td>{@code long}</td><td>{@code datetime}</td><td>reinterpret as epoch milliseconds (same 64-bit payload)</td></tr>
- *   <tr><td>{@code keyword}/{@code text}</td><td>{@code datetime}</td>
- *       <td>parse via {@link #parseDatetimeMillis}: the column's declared {@code format} when present,
- *           else the ISO {@code TO_DATETIME} default</td></tr>
- *   <tr><td>{@code keyword}</td><td>{@code text}</td><td>same bytes, different string flavor</td></tr>
- *   <tr><td>{@code text}</td><td>{@code keyword}</td><td>same bytes, different string flavor</td></tr>
- * </table>
- *
- * <p>Deliberate exclusions: numeric narrowing ({@code long → integer}) and {@code long → double}
- * are lossy; {@code integer → datetime} has no plausible epoch encoding in 32 bits;
- * {@code unsigned_long} is stored sign-flip-encoded so reinterprets are wrong by construction;
- * {@code date_nanos} is not a declarable type yet (see {@code DeclaredSchemaValidator}), so no
- * pair targets it — when it becomes declarable, {@code long → date_nanos} (reinterpret as epoch
- * nanos) and {@code keyword → date_nanos} belong here.
  *
  * <p>TODO: the columnar-vs-text classification this predicate pairs with
  * ({@code ExternalSourceResolver.FILE_TYPED_FORMATS}) has a standing TODO to move onto the
@@ -75,11 +101,55 @@ public final class DeclaredTypeCoercions {
 
     /**
      * Whether an external reader can coerce a value physically stored as {@code from} into the
-     * declared type {@code to} at read time. Equal types trivially return {@code true}. This is
-     * THE castability predicate — resolution-time rejects and reader-side per-file validation
-     * must both consult it so they cannot drift.
+     * declared type {@code to} at read time: exactly the pairs the field mappers coerce at
+     * ingest (see the class Javadoc for the set). Equal types trivially return {@code true};
+     * {@code NULL} and {@code UNSUPPORTED} always return {@code false} (the readers cannot
+     * decode such a column, so there is no value to coerce). This is THE castability predicate —
+     * resolution-time rejects and reader-side per-file validation must both consult it so they
+     * cannot drift.
      */
     public static boolean supports(DataType from, DataType to) {
+        if (from == to) {
+            return true;
+        }
+        if (from == null || to == null || isDecodable(from) == false || isDecodable(to) == false) {
+            return false;
+        }
+        boolean fromString = from == DataType.KEYWORD || from == DataType.TEXT;
+        // Temporal sources decode to epoch longs, so they ingest into numeric targets like longs.
+        boolean fromWholeNumber = from == DataType.INTEGER
+            || from == DataType.LONG
+            || from == DataType.UNSIGNED_LONG
+            || from == DataType.DATETIME
+            || from == DataType.DATE_NANOS;
+        boolean fromNumeric = fromWholeNumber || from == DataType.DOUBLE;
+        return switch (to) {
+            case KEYWORD, TEXT -> true; // ingest stringifies any scalar token
+            case LONG, INTEGER, DOUBLE, UNSIGNED_LONG -> fromString || fromNumeric;
+            case BOOLEAN -> fromString; // the boolean mapper accepts only true/false tokens, never numbers
+            // Epoch-millis reinterpret for whole numbers; a nanos payload is NOT millis, so
+            // date_nanos sources don't reinterpret into datetime (nor vice versa).
+            case DATETIME -> fromString || from == DataType.INTEGER || from == DataType.LONG || from == DataType.UNSIGNED_LONG;
+            case DATE_NANOS -> fromString;
+            case IP -> fromString;
+            default -> false;
+        };
+    }
+
+    private static boolean isDecodable(DataType type) {
+        return type != DataType.NULL && type != DataType.UNSUPPORTED;
+    }
+
+    /**
+     * The coercible pairs the columnar decode loops implement directly (fused into the decode,
+     * no {@link #castBlock} pass): the lossless {@code integer → long} widen, the
+     * {@code long → datetime} epoch-millis reinterpret, the {@code string → datetime} parse with
+     * the column's declared {@code format}, and the {@code keyword ↔ text} relabel (same bytes).
+     * Every other {@link #supports supported} pair decodes at the file's own type and coerces
+     * through {@link #castBlock}. Both Parquet and ORC consult this so the two readers cannot
+     * disagree about which path a pair takes.
+     */
+    public static boolean fusedInDecode(DataType from, DataType to) {
         if (from == to) {
             return true;
         }
@@ -93,10 +163,229 @@ public final class DeclaredTypeCoercions {
         if (fromString && (to == DataType.KEYWORD || to == DataType.TEXT)) {
             return true;
         }
-        if (fromString && to == DataType.DATETIME) {
-            return true;
+        return fromString && to == DataType.DATETIME;
+    }
+
+    /**
+     * Coerces a decoded physical-type block into a declared-type block, value by value, with the
+     * field mappers' ingest coercion (see the class Javadoc). Preserves nulls and multi-value
+     * positions. Does NOT take ownership of {@code source}; the caller closes it. The returned
+     * block is a fresh reference the caller owns (for the trivial {@code from == to} case the
+     * source is ref-bumped and returned).
+     * <p>
+     * Per-value failures — numeric overflow, an unparseable token — follow the bulk API's lenient
+     * model when {@code warnings} is non-null: the whole position is nulled and one capped
+     * response {@code Warning} header records the reason (never a hard read failure, never a
+     * silent wrong value). With a {@code null} {@code warnings} sink the coercion is strict and
+     * the failure propagates to the caller.
+     *
+     * @param declaredFormat the column's declared date parse pattern for the string&rarr;datetime
+     *                       pair ({@code null} = the ISO default); ignored by every other pair
+     * @param columnName     column name used in warning details; may be {@code null} when the
+     *                       caller is strict ({@code warnings == null})
+     */
+    public static Block castBlock(
+        Block source,
+        DataType from,
+        DataType to,
+        @Nullable DateFormatter declaredFormat,
+        BlockFactory blockFactory,
+        @Nullable String columnName,
+        @Nullable SkipWarnings warnings
+    ) {
+        int positions = source.getPositionCount();
+        if (from == to) {
+            source.incRef();
+            return source;
         }
-        return false;
+        if (source.areAllValuesNull()) {
+            return blockFactory.newConstantNullBlock(positions);
+        }
+        Function<Object, Object> coercer = scalarCoercer(from, to, declaredFormat);
+        IntFunction<Object> read = valueReader(source, from);
+        try (Block.Builder builder = builderFor(to, blockFactory, positions)) {
+            ValueWriter write = valueWriter(builder, to);
+            Object[] scratch = null;
+            for (int pos = 0; pos < positions; pos++) {
+                int count = source.getValueCount(pos);
+                if (source.isNull(pos) || count == 0) {
+                    builder.appendNull();
+                    continue;
+                }
+                int first = source.getFirstValueIndex(pos);
+                if (count == 1) {
+                    Object coerced;
+                    try {
+                        coerced = coercer.apply(read.apply(first));
+                    } catch (IllegalArgumentException | DateTimeException e) {
+                        onFailure(columnName, from, to, e, warnings);
+                        builder.appendNull();
+                        continue;
+                    }
+                    write.write(coerced);
+                } else {
+                    // Coerce the whole position before appending: a failure mid-entry cannot be
+                    // rolled back on the builder, and the bulk-API model nulls the field (the
+                    // position), not just the offending value.
+                    if (scratch == null || scratch.length < count) {
+                        scratch = new Object[count];
+                    }
+                    boolean failed = false;
+                    for (int v = 0; v < count && failed == false; v++) {
+                        try {
+                            scratch[v] = coercer.apply(read.apply(first + v));
+                        } catch (IllegalArgumentException | DateTimeException e) {
+                            onFailure(columnName, from, to, e, warnings);
+                            failed = true;
+                        }
+                    }
+                    if (failed) {
+                        builder.appendNull();
+                        continue;
+                    }
+                    builder.beginPositionEntry();
+                    for (int v = 0; v < count; v++) {
+                        write.write(scratch[v]);
+                    }
+                    builder.endPositionEntry();
+                }
+            }
+            return builder.build();
+        }
+    }
+
+    private static void onFailure(
+        @Nullable String columnName,
+        DataType from,
+        DataType to,
+        RuntimeException e,
+        @Nullable SkipWarnings warnings
+    ) {
+        if (warnings == null) {
+            throw e;
+        }
+        warnings.add(
+            "Column ["
+                + columnName
+                + "]: cannot coerce value from ["
+                + from.typeName()
+                + "] to declared type ["
+                + to.typeName()
+                + "]: "
+                + e.getMessage()
+                + "; returning null"
+        );
+    }
+
+    /**
+     * The per-value ingest coercion for a (from, to) pair. Numeric targets run the exact number
+     * mapper coercion ({@link NumberFieldMapper.NumberType#parse(Object, boolean) NumberType.parse}
+     * with {@code coerce=true}); {@code unsigned_long} mirrors it with the sign-flip block
+     * encoding on top; string sources parse into dates via {@link #parseDatetimeMillis} with the
+     * declared format, into booleans via the strict mapper token set, into ips via the mapper's
+     * doc-values encoding; whole-number sources reinterpret into dates as epoch millis; string
+     * targets stringify the token (temporal sources in ISO form).
+     */
+    private static Function<Object, Object> scalarCoercer(DataType from, DataType to, @Nullable DateFormatter declaredFormat) {
+        boolean fromString = from == DataType.KEYWORD || from == DataType.TEXT;
+        return switch (to) {
+            case KEYWORD, TEXT -> switch (from) {
+                case DATETIME -> v -> EsqlDataTypeConverter.dateTimeToString((Long) v);
+                case DATE_NANOS -> v -> EsqlDataTypeConverter.nanoTimeToString((Long) v);
+                // the token text, as keyword ingest of a scalar sees it
+                case INTEGER, LONG, UNSIGNED_LONG, DOUBLE, BOOLEAN, KEYWORD, TEXT -> String::valueOf;
+                default -> throw new IllegalArgumentException("cannot coerce from [" + from.typeName() + "] blocks");
+            };
+            case LONG -> v -> NumberFieldMapper.NumberType.LONG.parse(v, true);
+            case INTEGER -> v -> NumberFieldMapper.NumberType.INTEGER.parse(v, true);
+            case DOUBLE -> v -> NumberFieldMapper.NumberType.DOUBLE.parse(v, true);
+            case UNSIGNED_LONG -> DeclaredTypeCoercions::coerceToUnsignedLong;
+            case BOOLEAN -> v -> Booleans.parseBoolean((String) v);
+            case DATETIME -> fromString
+                ? v -> parseDatetimeMillis((String) v, declaredFormat)
+                // Whole-number source: epoch-millis reinterpret; the mapper coercion supplies the range check.
+                : v -> NumberFieldMapper.NumberType.LONG.parse(v, true).longValue();
+            case DATE_NANOS -> v -> EsqlDataTypeConverter.dateNanosToLong((String) v);
+            case IP -> v -> StringUtils.parseIP((String) v);
+            default -> throw new IllegalArgumentException(
+                "cannot coerce from [" + from.typeName() + "] to [" + to.typeName() + "]; supports() must gate castBlock callers"
+            );
+        };
+    }
+
+    /**
+     * The {@code unsigned_long} twin of {@link NumberFieldMapper.NumberType#parse(Object, boolean)
+     * NumberType.parse} with {@code coerce=true}: numeric strings parse, decimals truncate toward
+     * zero, out-of-[0, 2^64-1]-range throws. Returns the sign-flip block encoding
+     * ({@link NumericUtils#asLongUnsigned(BigInteger)}), matching the index path.
+     */
+    private static long coerceToUnsignedLong(Object value) {
+        BigInteger big;
+        if (value instanceof BigInteger bigInteger) {
+            big = bigInteger;
+        } else if (value instanceof Double || value instanceof Float) {
+            big = BigDecimal.valueOf(((Number) value).doubleValue()).toBigInteger();
+        } else if (value instanceof Number number) {
+            big = BigInteger.valueOf(number.longValue());
+        } else {
+            big = new BigDecimal(value.toString()).toBigInteger();
+        }
+        if (big.signum() < 0 || NumericUtils.isUnsignedLong(big) == false) {
+            throw new IllegalArgumentException("Value [" + value + "] is out of range for an unsigned_long");
+        }
+        return NumericUtils.asLongUnsigned(big);
+    }
+
+    /** Reads one decoded value from a physical-type block in the Java shape the mapper coercions expect. */
+    private static IntFunction<Object> valueReader(Block block, DataType from) {
+        return switch (from) {
+            case INTEGER -> i -> ((IntBlock) block).getInt(i);
+            case LONG, DATETIME, DATE_NANOS -> i -> ((LongBlock) block).getLong(i);
+            // unsigned_long blocks are sign-flip encoded; decode to the true Number before coercing
+            case UNSIGNED_LONG -> i -> NumericUtils.unsignedLongAsNumber(((LongBlock) block).getLong(i));
+            case DOUBLE -> i -> ((DoubleBlock) block).getDouble(i);
+            case BOOLEAN -> i -> ((BooleanBlock) block).getBoolean(i);
+            case KEYWORD, TEXT -> {
+                BytesRefBlock bytes = (BytesRefBlock) block;
+                BytesRef scratch = new BytesRef();
+                yield i -> bytes.getBytesRef(i, scratch).utf8ToString();
+            }
+            default -> throw new IllegalArgumentException("cannot coerce from [" + from.typeName() + "] blocks");
+        };
+    }
+
+    private static Block.Builder builderFor(DataType to, BlockFactory blockFactory, int positions) {
+        return switch (to) {
+            case INTEGER -> blockFactory.newIntBlockBuilder(positions);
+            case LONG, UNSIGNED_LONG, DATETIME, DATE_NANOS -> blockFactory.newLongBlockBuilder(positions);
+            case DOUBLE -> blockFactory.newDoubleBlockBuilder(positions);
+            case BOOLEAN -> blockFactory.newBooleanBlockBuilder(positions);
+            case KEYWORD, TEXT, IP -> blockFactory.newBytesRefBlockBuilder(positions);
+            default -> throw new IllegalArgumentException("cannot coerce into [" + to.typeName() + "] blocks");
+        };
+    }
+
+    private interface ValueWriter {
+        void write(Object coerced);
+    }
+
+    /**
+     * Appends one coerced value in the declared type's block encoding. The scalar coercers
+     * already produce block-ready shapes: {@link Number}s for numeric targets (the
+     * {@code unsigned_long} coercer returns the sign-flip encoding), epoch longs for temporal
+     * targets, {@link String}s for string targets, and pre-encoded {@link BytesRef}s for ip.
+     */
+    private static ValueWriter valueWriter(Block.Builder builder, DataType to) {
+        return switch (to) {
+            case INTEGER -> v -> ((IntBlock.Builder) builder).appendInt(((Number) v).intValue());
+            case LONG, UNSIGNED_LONG, DATETIME, DATE_NANOS -> v -> ((LongBlock.Builder) builder).appendLong(((Number) v).longValue());
+            case DOUBLE -> v -> ((DoubleBlock.Builder) builder).appendDouble(((Number) v).doubleValue());
+            case BOOLEAN -> v -> ((BooleanBlock.Builder) builder).appendBoolean((Boolean) v);
+            case KEYWORD, TEXT, IP -> v -> ((BytesRefBlock.Builder) builder).appendBytesRef(
+                v instanceof BytesRef bytes ? bytes : new BytesRef(v.toString())
+            );
+            default -> throw new IllegalArgumentException("cannot coerce into [" + to.typeName() + "] blocks");
+        };
     }
 
     /**
@@ -106,12 +395,13 @@ public final class DeclaredTypeCoercions {
      * an identical declared format produce the identical epoch instant regardless of file format.
      * <p>
      * With a declared format the parse is strict and zone-aware ({@link DateFormatter#parseMillis}
-     * defaults a missing zone to UTC); without one it falls back to
-     * {@link EsqlDataTypeConverter#dateTimeToLong(String)} — the same ISO
-     * ({@code strict_date_optional_time}) semantics as {@code TO_DATETIME}, which is the right
-     * mental model for a declared cast. Throws {@link IllegalArgumentException} on an unparseable
-     * value; callers decide whether that is a per-row error (text error policy) or a hard read
-     * failure (columnar).
+     * defaults a missing zone to UTC) — the same parse the date field mapper runs against its
+     * mapping's {@code format} at ingest; without one it falls back to
+     * {@link EsqlDataTypeConverter#dateTimeToLong(String)} — ISO
+     * ({@code strict_date_optional_time}) semantics. Throws {@link IllegalArgumentException} on an
+     * unparseable value; callers decide whether that is a per-row error (text error policy), a
+     * nulled cell with a response Warning ({@link #castBlock} with a warnings sink), or a hard
+     * failure.
      */
     public static long parseDatetimeMillis(String value, @Nullable DateFormatter declaredFormat) {
         return EsqlDataTypeConverter.dateTimeToLong(value, declaredFormat);
